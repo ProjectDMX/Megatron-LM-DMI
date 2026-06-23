@@ -93,6 +93,9 @@ def test_mock_gpt_dataset():
 
     sample = datasets[1][datasets[1].shuffle_index.argmax()]
     argmax = sample['labels'].shape[0] - torch.flip(sample['labels'], [0]).argmax() - 1
+    assert sample['dmi_valid_count'].dtype == torch.int64
+    assert sample['dmi_valid_count'].shape == torch.Size([])
+    assert sample['dmi_valid_count'] == argmax + 2
 
     # Test add_extra_token_to_sequence
     assert sample['tokens'][argmax] != tokenizer.eod
@@ -111,6 +114,7 @@ def test_mock_gpt_dataset():
 
     # Check handling of None index
     assert not torch.any(sample['loss_mask'])
+    assert sample['dmi_valid_count'] == 0
 
 
 if __name__ == "__main__":

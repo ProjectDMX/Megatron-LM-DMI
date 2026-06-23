@@ -130,6 +130,9 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     cu_seqlens_padded = batch.pop('cu_seqlens_padded', None)
     max_seqlen = batch.pop('max_seqlen', None)
     local_cp_size = batch.pop('local_cp_size', None)
+    # DMI-only metadata.  Keep it out of Megatron's native model/loss tuple;
+    # the DMI schedule/context layer consumes it before model execution.
+    batch.pop('dmi_valid_count', None)
     if local_cp_size is not None:
         local_cp_size = int(local_cp_size.item())
 
