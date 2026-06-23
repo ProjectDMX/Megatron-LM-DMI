@@ -552,6 +552,17 @@ _R = TypeVar('_R')
 _Ts = TypeVarTuple('_Ts')
 
 
+def _dmi_recompute_region():
+    """Return DMI's recompute context if DMI is installed, else a no-op."""
+
+    try:
+        from monitoring.recompute_context import dmi_recompute_region
+
+        return dmi_recompute_region()
+    except Exception:
+        return contextlib.nullcontext()
+
+
 class CheckpointFunction(torch.autograd.Function):
     """Checkpoint Function
 
@@ -618,7 +629,8 @@ class CheckpointFunction(torch.autograd.Function):
             # Compute the forward pass.
             detached_inputs = detach_variable(inputs)
             with torch.enable_grad():
-                outputs = ctx.run_function(*detached_inputs)
+                with _dmi_recompute_region():
+                    outputs = ctx.run_function(*detached_inputs)
 
         if isinstance(outputs, torch.Tensor):
             outputs = (outputs,)
@@ -772,7 +784,8 @@ class CheckpointWithoutOutput(object):
 
             inputs = tuple(detach(t) for t in inputs)
             with torch.enable_grad(), fp8_ctx, recompute_ctx:
-                outputs = self.run_function(*inputs)
+                with _dmi_recompute_region():
+                    outputs = self.run_function(*inputs)
 
         self.run_function = None
         self.rng_states = None

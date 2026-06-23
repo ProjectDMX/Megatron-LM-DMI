@@ -2509,6 +2509,16 @@ def te_checkpoint(
     forward_func, distribute_saved_activations, get_rng_state_tracker, tp_group, *args, **kwargs
 ):
     """Checkpointing with Transformer-Engine."""
+    try:
+        from monitoring.recompute_context import get_active_recompute_context
+
+        if get_active_recompute_context() is not None:
+            raise NotImplementedError(
+                "DMI does not support Transformer-Engine checkpoint recompute yet"
+            )
+    except ImportError:
+        pass
+
     if not HAVE_TE:
         raise ImportError(
             "Transformer Engine is not installed. "
