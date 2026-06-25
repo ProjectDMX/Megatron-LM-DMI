@@ -533,6 +533,28 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
                 group=mpu.get_tensor_model_parallel_group(),
             )
 
+    def _broadcast_dmi_valid_count(valid_count=None):
+        dev = torch.cuda.current_device()
+        has_valid_count = torch.tensor(
+            0 if valid_count is None else 1,
+            dtype=torch.int64,
+            device=dev,
+        )
+        _broadcast(has_valid_count)
+        if int(has_valid_count.item()) == 0:
+            return None
+
+        if valid_count is None:
+            valid_count = torch.empty(args.micro_batch_size, dtype=torch.int64, device=dev)
+        else:
+            valid_count = valid_count.to(
+                device=dev,
+                dtype=torch.int64,
+                non_blocking=True,
+            ).view(-1).contiguous()
+        _broadcast(valid_count)
+        return valid_count
+
     if mpu.get_tensor_model_parallel_rank() == 0:
 
         assert data_iterator is not None
@@ -562,6 +584,9 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
                 if "local_cp_size" not in data
                 else data["local_cp_size"].cuda(non_blocking=True)
             ),
+            # DMI-only metadata.  It is consumed by the DMI context layer and
+            # removed before Megatron's native model/loss tuple is returned.
+            'dmi_valid_count': data.get("dmi_valid_count", None),
         }
 
         def _broadcast_cu_seqlens(cu_seqlens):
@@ -592,6 +617,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast_cu_seqlens(batch['cu_seqlens'])
             _broadcast(batch['max_seqlen'])
             _broadcast(batch['local_cp_size'])
+            batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
         elif mpu.is_pipeline_first_stage():
             _broadcast(batch['tokens'])
@@ -599,6 +625,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(batch['position_ids'])
             _broadcast_cu_seqlens(batch['cu_seqlens'])
             _broadcast(batch['max_seqlen'])
+            batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
         elif mpu.is_pipeline_last_stage():
             # Multi-Token Prediction (MTP) layers need tokens and position_ids to calculate embedding.
@@ -607,6 +634,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(batch['labels'])
             _broadcast(batch['loss_mask'])
             _broadcast(batch['attention_mask'])
+            batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
     else:
         if args.hybrid_context_parallel:
@@ -660,6 +688,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             dtype=torch.int32,
             device=torch.cuda.current_device(),
         ) if args.hybrid_context_parallel else None
+        dmi_valid_count = None
 
         def _broadcast_cu_seqlens():
             dev = torch.cuda.current_device()
@@ -685,6 +714,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             cu_seqlens = _broadcast_cu_seqlens()
             _broadcast(max_seqlen)
             _broadcast(local_cp_size)
+            dmi_valid_count = _broadcast_dmi_valid_count()
 
         elif mpu.is_pipeline_first_stage():
             labels = None
@@ -695,6 +725,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(position_ids)
             cu_seqlens = _broadcast_cu_seqlens()
             _broadcast(max_seqlen)
+            dmi_valid_count = _broadcast_dmi_valid_count()
 
         elif mpu.is_pipeline_last_stage():
             # Multi-Token Prediction (MTP) layers need tokens and position_ids to calculate embedding.
@@ -708,6 +739,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(labels)
             _broadcast(loss_mask)
             _broadcast(attention_mask)
+            dmi_valid_count = _broadcast_dmi_valid_count()
 
         batch = {
             'tokens': tokens,
@@ -718,6 +750,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             'cu_seqlens': cu_seqlens,
             'max_seqlen': max_seqlen,
             'local_cp_size': local_cp_size,
+            'dmi_valid_count': dmi_valid_count,
         }
 
     return batch
