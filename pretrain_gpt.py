@@ -52,6 +52,18 @@ from megatron.training.utils import (
 from model_provider import model_provider
 
 try:
+    from integration.megatron_schedule_runtime import (
+        dmi_enter_current_scope,
+        dmi_record_current_microbatch_metadata,
+    )
+except Exception:
+    def dmi_record_current_microbatch_metadata(valid_count):
+        del valid_count
+
+    def dmi_enter_current_scope():
+        pass
+
+try:
     from megatron.post_training.arguments import add_modelopt_args
     from megatron.post_training.loss_func import loss_func as loss_func_modelopt
 
@@ -132,7 +144,7 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     local_cp_size = batch.pop('local_cp_size', None)
     # DMI-only metadata.  Keep it out of Megatron's native model/loss tuple;
     # the DMI schedule/context layer consumes it before model execution.
-    batch.pop('dmi_valid_count', None)
+    dmi_record_current_microbatch_metadata(batch.pop('dmi_valid_count', None))
     if local_cp_size is not None:
         local_cp_size = int(local_cp_size.item())
 
@@ -250,6 +262,7 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
         vp_stage = get_attr_wrapped_model(model, "vp_stage")
         tokens, labels, loss_mask, attention_mask, position_ids, packed_seq_params = get_batch(data_iterator, vp_stage)
     timers('batch-generator').stop()
+    dmi_enter_current_scope()
 
     with stimer:
         if args.use_legacy_models:

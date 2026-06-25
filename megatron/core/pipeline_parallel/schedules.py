@@ -41,6 +41,30 @@ from .combined_1f1b import (
 )
 from .hybrid_cp_schedule import hybrid_context_parallel_forward_backward
 
+try:
+    from integration.megatron_schedule_runtime import (
+        dmi_begin_iteration,
+        dmi_end_iteration,
+        dmi_enter_current_scope,
+        dmi_guard_schedule_supported,
+        dmi_set_current_event,
+    )
+except Exception:
+    def dmi_guard_schedule_supported(config, forward_only):
+        del config, forward_only
+
+    def dmi_begin_iteration(active_num_microbatches, *, forward_only=False):
+        del active_num_microbatches, forward_only
+
+    def dmi_set_current_event(direction, microbatch_id, scope_id=0):
+        del direction, microbatch_id, scope_id
+
+    def dmi_enter_current_scope():
+        pass
+
+    def dmi_end_iteration():
+        pass
+
 # Types
 Shape = Union[List[int], torch.Size]
 
@@ -632,6 +656,8 @@ def forward_backward_no_pipelining(
     ), "adjust_tensor_shapes_fn is not supported for non-pipeline-parallel schedule"
 
     config = get_model_config(model)
+    dmi_guard_schedule_supported(config, forward_only)
+    dmi_begin_iteration(num_microbatches, forward_only=forward_only)
     if config.timers is not None:
         config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
 
@@ -683,6 +709,7 @@ def forward_backward_no_pipelining(
     else:
         with no_sync_func():
             for i in range(num_microbatches - 1):
+                dmi_set_current_event("fwd", i, 0)
                 output_tensor, num_tokens = forward_step(
                     forward_step_func,
                     data_iterator,
@@ -698,9 +725,12 @@ def forward_backward_no_pipelining(
                 )
                 total_num_tokens += num_tokens
                 if not forward_only:
+                    dmi_set_current_event("bwd", i, 0)
+                    dmi_enter_current_scope()
                     backward_step(input_tensor, output_tensor, output_tensor_grad, config)
         # Run computation for last microbatch out of context handler (want to
         # synchronize gradients).
+        dmi_set_current_event("fwd", num_microbatches - 1, 0)
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -720,6 +750,8 @@ def forward_backward_no_pipelining(
         total_num_tokens += num_tokens
 
         if not forward_only:
+            dmi_set_current_event("bwd", num_microbatches - 1, 0)
+            dmi_enter_current_scope()
             backward_step(input_tensor, output_tensor, output_tensor_grad, config)
 
     if config.finalize_model_grads_func is not None and not forward_only:
@@ -737,6 +769,8 @@ def forward_backward_no_pipelining(
 
     if config.timers is not None:
         config.timers('forward-backward').stop()
+
+    dmi_end_iteration()
 
     if (
         hasattr(config, 'cuda_graph_impl')
@@ -905,6 +939,8 @@ def forward_backward_pipelining_with_interleaving(
     # virtual_microbatch_id in [0, total_num_microbatches)
 
     config = get_model_config(model[0])
+    dmi_guard_schedule_supported(config, forward_only)
+    dmi_begin_iteration(num_microbatches, forward_only=forward_only)
     if p2p_communicator is None and pg_collection is None:
         p2p_communicator = P2PCommunicator(
             pp_group=parallel_state.get_pipeline_model_parallel_group(), config=config
@@ -1257,6 +1293,7 @@ def forward_backward_pipelining_with_interleaving(
             virtual_microbatch_id, model_chunk_id, microbatch_id
         )
 
+        dmi_set_current_event("fwd", microbatch_id, model_chunk_id)
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator[model_chunk_id],
@@ -1325,11 +1362,14 @@ def forward_backward_pipelining_with_interleaving(
         """Helper method to run backward step with model split into chunks"""
         nonlocal output_tensor_grads
         model_chunk_id = get_model_chunk_id(virtual_microbatch_id, forward=False)
+        microbatch_id = microbatch_id_table[virtual_microbatch_id % total_num_microbatches]
 
         input_tensor, output_tensor, output_tensor_grad = backward_step_helper_preprocess(
             virtual_microbatch_id, model_chunk_id
         )
 
+        dmi_set_current_event("bwd", microbatch_id, model_chunk_id)
+        dmi_enter_current_scope()
         input_tensor_grad = backward_step(input_tensor, output_tensor, output_tensor_grad, config)
 
         backward_step_helper_postprocess(virtual_microbatch_id)
@@ -1961,6 +2001,8 @@ def forward_backward_pipelining_with_interleaving(
     if config.timers is not None:
         config.timers('forward-backward').stop()
 
+    dmi_end_iteration()
+
     if (
         hasattr(config, 'cuda_graph_impl')
         and config.cuda_graph_impl == "local"
@@ -2038,6 +2080,8 @@ def forward_backward_pipelining_without_interleaving(
         data_iterator = data_iterator[0]
 
     config = get_model_config(model)
+    dmi_guard_schedule_supported(config, forward_only)
+    dmi_begin_iteration(num_microbatches, forward_only=forward_only)
     if config.overlap_p2p_comm:
         raise ValueError(
             "Non-interleaved pipeline parallelism does not support overlapping p2p communication"
@@ -2190,6 +2234,7 @@ def forward_backward_pipelining_without_interleaving(
     if not forward_only:
         input_tensors = []
         output_tensors = []
+        dmi_microbatch_ids = []
     forward_data_store = []
 
     # Run warmup forward passes.
@@ -2206,6 +2251,7 @@ def forward_backward_pipelining_without_interleaving(
         input_tensor = p2p_communicator.recv_forward(
             recv_tensor_shapes, p2p_communicator.is_pp_first_stage
         )
+        dmi_set_current_event("fwd", i, 0)
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -2227,6 +2273,7 @@ def forward_backward_pipelining_without_interleaving(
         if not forward_only:
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
+            dmi_microbatch_ids.append(i)
             deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
     # Before running 1F1B, need to receive first forward tensor.
@@ -2249,6 +2296,8 @@ def forward_backward_pipelining_without_interleaving(
         else:
             checkpoint_activations_microbatch = None
 
+        forward_microbatch_id = i + num_warmup_microbatches
+        dmi_set_current_event("fwd", forward_microbatch_id, 0)
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -2263,7 +2312,7 @@ def forward_backward_pipelining_without_interleaving(
             is_first_microbatch=check_first_val_step(
                 first_val_step, forward_only, (i == 0) and (num_warmup_microbatches == 0)
             ),
-            current_microbatch=i + num_warmup_microbatches,
+            current_microbatch=forward_microbatch_id,
             is_last_stage=p2p_communicator.is_pp_last_stage,
         )
         total_num_tokens += num_tokens
@@ -2282,12 +2331,14 @@ def forward_backward_pipelining_without_interleaving(
             # Add input_tensor and output_tensor to end of list.
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
+            dmi_microbatch_ids.append(forward_microbatch_id)
             deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
             # Pop input_tensor and output_tensor from the start of the list for
             # the backward pass.
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
+            dmi_backward_microbatch_id = dmi_microbatch_ids.pop(0)
 
             # Enable grad sync for the last microbatch in the batch if the full
             # backward pass completes in the 1F1B stage.
@@ -2295,6 +2346,8 @@ def forward_backward_pipelining_without_interleaving(
                 if config.grad_sync_func is None or p2p_communicator.is_pp_first_stage:
                     enable_grad_sync()
 
+            dmi_set_current_event("bwd", dmi_backward_microbatch_id, 0)
+            dmi_enter_current_scope()
             input_tensor_grad = backward_func(
                 input_tensor, output_tensor, output_tensor_grad, config
             )
@@ -2324,11 +2377,14 @@ def forward_backward_pipelining_without_interleaving(
 
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
+            dmi_backward_microbatch_id = dmi_microbatch_ids.pop(0)
 
             output_tensor_grad = p2p_communicator.recv_backward(
                 send_tensor_shapes, p2p_communicator.is_pp_last_stage
             )
 
+            dmi_set_current_event("bwd", dmi_backward_microbatch_id, 0)
+            dmi_enter_current_scope()
             input_tensor_grad = backward_func(
                 input_tensor, output_tensor, output_tensor_grad, config
             )
@@ -2364,6 +2420,8 @@ def forward_backward_pipelining_without_interleaving(
 
     if config.timers is not None:
         config.timers('forward-backward').stop()
+
+    dmi_end_iteration()
 
     if (
         hasattr(config, 'cuda_graph_impl')
