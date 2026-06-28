@@ -10,6 +10,22 @@ from megatron.core.tensor_parallel.random import get_all_rng_states
 
 logger = logging.getLogger(__name__)
 
+try:
+    from integration.megatron_schedule_runtime import (
+        dmi_abort_cuda_graph_capture,
+        dmi_begin_cuda_graph_capture,
+        dmi_finish_cuda_graph_capture,
+    )
+except Exception:
+    def dmi_begin_cuda_graph_capture(*, warmup_enabled=True):
+        del warmup_enabled
+
+    def dmi_finish_cuda_graph_capture():
+        return None
+
+    def dmi_abort_cuda_graph_capture():
+        pass
+
 # The below functions traverse through nested data structures (tuples, lists, dicts)
 # present in src and creates a deep copy where all PyTorch tensors are cloned,
 # detached from the computation graph, and moved to CUDA device. Non-tensor objects
@@ -104,6 +120,7 @@ class FullCudaGraphWrapper:
         self.forward_backward_func = forward_backward_func
         self.static_loader = StaticBufferLoader()
         self.cuda_graph_warmup_steps = cuda_graph_warmup_steps
+        self._dmi_plans = {}
 
     def data_read(self, data_iterator, model, training, num_microbatches):
         """Read all microbatch inputs from Dataloader and copy to static buffers."""
@@ -171,14 +188,22 @@ class FullCudaGraphWrapper:
                 FullCudaGraphWrapper.cuda_graph[training_str].register_generator_state(state)
             torch.cuda.synchronize()
             capture_stream = torch.cuda.Stream()
-            with torch.cuda.graph(
-                FullCudaGraphWrapper.cuda_graph[training_str],
-                stream=capture_stream,
-                capture_error_mode="thread_local",
-            ):
-                FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
-                    *args, **kwargs
-                )
+            dmi_begin_cuda_graph_capture(warmup_enabled=True)
+            try:
+                with torch.cuda.graph(
+                    FullCudaGraphWrapper.cuda_graph[training_str],
+                    stream=capture_stream,
+                    capture_error_mode="thread_local",
+                ):
+                    FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
+                        *args, **kwargs
+                    )
+                dmi_plan = dmi_finish_cuda_graph_capture()
+                if dmi_plan is not None:
+                    self._dmi_plans[training_str] = dmi_plan
+            except Exception:
+                dmi_abort_cuda_graph_capture()
+                raise
             torch.cuda.synchronize()
             torch.distributed.barrier()
             logger.info(f'CUDA graph capture done for {training_str}!!!')

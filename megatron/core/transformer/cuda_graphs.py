@@ -68,6 +68,22 @@ _IS_GRAPH_CAPTURING = False
 _IS_GRAPH_WARMUP = False
 logger = logging.getLogger(__name__)
 
+try:
+    from integration.megatron_schedule_runtime import (
+        dmi_abort_cuda_graph_capture,
+        dmi_begin_cuda_graph_capture,
+        dmi_finish_cuda_graph_capture,
+    )
+except Exception:
+    def dmi_begin_cuda_graph_capture(*, warmup_enabled=True):
+        del warmup_enabled
+
+    def dmi_finish_cuda_graph_capture():
+        return None
+
+    def dmi_abort_cuda_graph_capture():
+        pass
+
 # Freeze GC during capture.
 # TODO (@lmcafee): remove all freeze-GC code once most users are on PyTorch 2.9+.
 FREEZE_GC = os.getenv("CUDA_GRAPH_CAPTURE_FREEZE_GC") != "0"
@@ -948,12 +964,20 @@ class _CudaGraphRunner(torch.nn.Module):
                 if FREEZE_GC:
                     gc.freeze()
 
-                with torch.cuda.graph(
-                    self.fwd_graph, pool=self.mempool, capture_error_mode="thread_local"
-                ):
-                    fwd_graph_outputs = self.func(
-                        *self.fwd_graph_input_args, **self.fwd_graph_input_kwargs
-                    )
+                dmi_begin_cuda_graph_capture(warmup_enabled=True)
+                try:
+                    with torch.cuda.graph(
+                        self.fwd_graph, pool=self.mempool, capture_error_mode="thread_local"
+                    ):
+                        fwd_graph_outputs = self.func(
+                            *self.fwd_graph_input_args, **self.fwd_graph_input_kwargs
+                        )
+                    dmi_plan = dmi_finish_cuda_graph_capture()
+                    if dmi_plan is not None:
+                        self._dmi_fwd_plan = dmi_plan
+                except Exception:
+                    dmi_abort_cuda_graph_capture()
+                    raise
 
                 # Unfreeze GC.
                 if FREEZE_GC:
@@ -1064,15 +1088,23 @@ class _CudaGraphRunner(torch.nn.Module):
         if FREEZE_GC:
             gc.freeze()
 
-        with torch.cuda.graph(self.bwd_graph, pool=self.mempool):
-            grad_inputs = torch.autograd.grad(
-                outputs=tuple(o for o in self.fwd_graph_output_surface if o.requires_grad),
-                inputs=tuple(i for i in self.fwd_graph_input_surface if i.requires_grad),
-                grad_outputs=tuple(o for o in self.static_grad_outputs if o is not None),
-                retain_graph=self.backward_retain_grad,
-                only_inputs=True,
-                allow_unused=True,
-            )
+        dmi_begin_cuda_graph_capture(warmup_enabled=True)
+        try:
+            with torch.cuda.graph(self.bwd_graph, pool=self.mempool):
+                grad_inputs = torch.autograd.grad(
+                    outputs=tuple(o for o in self.fwd_graph_output_surface if o.requires_grad),
+                    inputs=tuple(i for i in self.fwd_graph_input_surface if i.requires_grad),
+                    grad_outputs=tuple(o for o in self.static_grad_outputs if o is not None),
+                    retain_graph=self.backward_retain_grad,
+                    only_inputs=True,
+                    allow_unused=True,
+                )
+            dmi_plan = dmi_finish_cuda_graph_capture()
+            if dmi_plan is not None:
+                self._dmi_bwd_plan = dmi_plan
+        except Exception:
+            dmi_abort_cuda_graph_capture()
+            raise
 
         # Unfreeze GC.
         if FREEZE_GC:
