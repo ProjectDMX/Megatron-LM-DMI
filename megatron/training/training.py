@@ -1024,6 +1024,22 @@ def pretrain(
     timers('model-and-optimizer-setup').stop()
     print_datetime('after model, optimizer, and learning rate ' 'scheduler are built')
     config = get_model_config(model[0])
+    dmi_handle = None
+    dmi_env_enable = str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on")
+    if getattr(args, "dmi_enable", None) or dmi_env_enable:
+        try:
+            from integration.megatron_startup import setup_megatron_dmi
+        except ImportError as exc:
+            raise RuntimeError(
+                "DMI was enabled, but integration.megatron_startup is not importable. "
+                "Run Megatron with the DMI repository on PYTHONPATH."
+            ) from exc
+        dmi_handle = setup_megatron_dmi(
+            model,
+            args=args,
+            model_config=config,
+            printer=print_rank_0,
+        )
 
     # Build a separate inference model for RL if requested.
     inference_model = None
@@ -1267,6 +1283,9 @@ def pretrain(
 
     if args.perform_rl_step:
         rl_utils.rl_inference_interface_shutdown()
+
+    if dmi_handle is not None:
+        dmi_handle.close()
 
     ft_integration.shutdown()
     one_logger_utils.finish()

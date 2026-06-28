@@ -1,6 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from typing import Optional, Union
 
 import torch
@@ -24,6 +25,22 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.transformer.moe.router_replay import RouterReplay
 from megatron.core.transformer.transformer_config import TransformerConfig
+
+try:
+    from integration.megatron_router_summary import router_probs_mean_from_logits
+    from monitoring.hook_point_v1 import (
+        DimSpec,
+        HookPointV1,
+        HookSpecV1,
+        OutputSpec,
+        PreprocessSpec,
+        ProducerKind,
+        ShardPolicy,
+    )
+
+    _DMI_ROUTER_SUMMARY_AVAILABLE = True
+except Exception:
+    _DMI_ROUTER_SUMMARY_AVAILABLE = False
 
 
 class Router(ABC, MegatronModule):
@@ -215,6 +232,44 @@ class TopKRouter(Router):
         self.router_replay = None
         if self.config.moe_enable_routing_replay:
             self.router_replay = RouterReplay()
+
+        self.dmi_router_probs_mean = None
+        if _DMI_ROUTER_SUMMARY_AVAILABLE:
+            self.dmi_router_probs_mean = HookPointV1(
+                HookSpecV1(
+                    name="router_probs_mean",
+                    layer_no=-1,
+                    outputs=[
+                        OutputSpec(
+                            name="router_probs_mean",
+                            shape=[DimSpec.BATCH, DimSpec.NUM_EXPERTS],
+                            dtype=torch.float32,
+                            producer=ProducerKind.STATIC,
+                        )
+                    ],
+                    preprocess=PreprocessSpec(self._dmi_router_probs_mean_from_logits),
+                    shard_policy=ShardPolicy.REPLICATED,
+                    enabled_by=frozenset({"router-summary"}),
+                )
+            )
+            self.dmi_router_probs_mean.valid_count_fwd = torch.empty(0, dtype=torch.int64)
+            self.dmi_router_probs_mean.valid_count_bwd = torch.empty(0, dtype=torch.int64)
+
+    def set_layer_number(self, layer_number: int):
+        """Set the layer number for the router."""
+        super().set_layer_number(layer_number)
+        if self.dmi_router_probs_mean is not None and self.dmi_router_probs_mean.spec is not None:
+            self.dmi_router_probs_mean.spec = replace(
+                self.dmi_router_probs_mean.spec,
+                layer_no=int(layer_number) - 1,
+            )
+
+    def _dmi_router_probs_mean_from_logits(
+        self,
+        logits: torch.Tensor,
+        valid_count: torch.Tensor,
+    ) -> torch.Tensor:
+        return router_probs_mean_from_logits(logits, valid_count, self.score_function)
 
     def _maintain_float32_expert_bias(self):
         """
@@ -703,6 +758,9 @@ class TopKRouter(Router):
             logits = apply_biased_logits(
                 logits, self.config.moe_router_force_biased, self.layer_number
             )
+
+        if self.dmi_router_probs_mean is not None:
+            self.dmi_router_probs_mean(logits, self.dmi_router_probs_mean.valid_count_fwd)
 
         probs, routing_map = self.routing(logits, padding_mask=padding_mask)
 

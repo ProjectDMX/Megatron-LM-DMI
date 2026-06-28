@@ -82,6 +82,7 @@ def add_megatron_arguments(parser: argparse.ArgumentParser):
     parser = _add_msc_args(parser)
     parser = _add_kitchen_quantization_arguments(parser)
     parser = _add_sft_args(parser)
+    parser = _add_dmi_args(parser)
 
     return parser
 
@@ -3320,4 +3321,83 @@ def _add_sft_args(parser):
     group.add_argument('--sft', action="store_true", help='Megatron SFT training')
     group.add_argument('--sft-tokenizer-prompt-format', type=str, default="nemotron-h-aligned",
                        help='SFT prompt format.')
+    return parser
+
+
+def _add_dmi_args(parser):
+    group = parser.add_argument_group(title='dmi')
+
+    group.add_argument(
+        '--dmi-enable',
+        action='store_true',
+        default=None,
+        help='Enable DMI training monitoring integration.',
+    )
+    group.add_argument(
+        '--dmi-hook-selection',
+        type=str,
+        default=None,
+        help='DMI HookPointV1 hook selection name.',
+    )
+    group.add_argument(
+        '--dmi-model-id',
+        type=str,
+        default=None,
+        help='DMI model/run identifier. Auto-generated when omitted.',
+    )
+    group.add_argument(
+        '--dmi-db-host',
+        type=str,
+        default=None,
+        help='ClickHouse host for DMI training rows. Empty value uses null/offload-only mode.',
+    )
+    group.add_argument(
+        '--dmi-db-port',
+        type=int,
+        default=None,
+        help='ClickHouse port for DMI training rows.',
+    )
+    group.add_argument(
+        '--dmi-db-database',
+        type=str,
+        default=None,
+        help='ClickHouse database for DMI training rows.',
+    )
+    group.add_argument(
+        '--dmi-clickhouse-table',
+        type=str,
+        default=None,
+        help='ClickHouse table for DMI training rows.',
+    )
+    group.add_argument(
+        '--dmi-ch-parallelism',
+        type=int,
+        default=None,
+        help='Parallelism for DMI ClickHouse insert stage.',
+    )
+    group.add_argument(
+        '--dmi-ring-payload-mb',
+        type=int,
+        default=None,
+        help='DMI ring payload buffer size in MiB.',
+    )
+    group.add_argument(
+        '--dmi-ring-pinned-mb',
+        type=int,
+        default=None,
+        help='DMI pinned staging buffer size in MiB.',
+    )
+    group.add_argument(
+        '--dmi-ring-task-entries',
+        type=int,
+        default=None,
+        help='DMI ring task queue entry count.',
+    )
+    group.add_argument(
+        '--dmi-rank-gating',
+        choices=['representative', 'all'],
+        default=None,
+        help='DMI emission policy across TP/EP/CP ranks.',
+    )
+
     return parser
