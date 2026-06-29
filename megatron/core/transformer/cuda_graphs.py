@@ -73,6 +73,11 @@ try:
         dmi_abort_cuda_graph_capture,
         dmi_begin_cuda_graph_capture,
         dmi_finish_cuda_graph_capture,
+        dmi_force_eager_unit,
+        dmi_prepare_local_backward_replay,
+        dmi_prepare_local_forward_boundary,
+        dmi_prepare_local_forward_replay,
+        dmi_take_local_backward_token,
     )
 except Exception:
     def dmi_begin_cuda_graph_capture(*, warmup_enabled=True):
@@ -83,6 +88,23 @@ except Exception:
 
     def dmi_abort_cuda_graph_capture():
         pass
+
+    def dmi_prepare_local_forward_boundary(runner):
+        del runner
+        return False
+
+    def dmi_prepare_local_forward_replay(runner):
+        del runner
+
+    def dmi_take_local_backward_token(runner):
+        del runner
+        return None
+
+    def dmi_prepare_local_backward_replay(runner, token):
+        del runner, token
+
+    def dmi_force_eager_unit():
+        return nullcontext()
 
 # Freeze GC during capture.
 # TODO (@lmcafee): remove all freeze-GC code once most users are on PyTorch 2.9+.
@@ -605,6 +627,7 @@ class _CudagraphReplayNode(torch.autograd.Function):
                     cudagraph_input.copy_(user_input)
 
         ctx.runner = runner
+        ctx.dmi_bwd_replay_token = dmi_take_local_backward_token(runner)
         ctx.save_for_backward(*need_copy_inputs)
 
         if runner.fp8_enabled or runner.fp4_enabled:
@@ -660,6 +683,7 @@ class _CudagraphReplayNode(torch.autograd.Function):
             if user_output_grad.data_ptr() != cudagraph_output_grad.data_ptr():
                 cudagraph_output_grad.copy_(user_output_grad)
 
+        dmi_prepare_local_backward_replay(runner, getattr(ctx, "dmi_bwd_replay_token", None))
         runner.bwd_graph.replay()
         runner.status = _GraphStatus.FWD_READY
 
@@ -1285,9 +1309,7 @@ class _CudaGraphRunner(torch.nn.Module):
             return out[0]
         return tuple(out)
 
-    def replay_graph_capture(self, is_first_microbatch, args, kwargs):
-        """Replay the fwd cuda graph with autograd."""
-
+    def validate_graph_capture_args(self, args, kwargs):
         # Arguments passed to a cudagraph for replay must match the args in the captured graph.
         #  Tensor arguments need to have the same shape, dtype, and device location.
         #  All other arguments must have the exact same memory addresses for graph safety.
@@ -1295,6 +1317,12 @@ class _CudaGraphRunner(torch.nn.Module):
         if mismatch_errors:
             error_msg = "CUDA graph argument mismatch:\n" + "\n".join(mismatch_errors)
             raise AssertionError(error_msg)
+
+    def replay_graph_capture(self, is_first_microbatch, args, kwargs, validate_args=True):
+        """Replay the fwd cuda graph with autograd."""
+
+        if validate_args:
+            self.validate_graph_capture_args(args, kwargs)
 
         inp_tensors = self.get_tensors(args, kwargs, check_types=False)
         if self.grad_enabled:
@@ -1602,14 +1630,25 @@ class CudaGraphManager(torch.nn.Module):
             is_in_checkpoint_fwd = is_in_checkpoint_fwd or is_fp8_activation_recompute_enabled()
 
         if _CudagraphGlobalRecord.cudagraph_created:
+            runner = self.get_cudagraph_runner(megatron_module, args, kwargs, self.reuse_cudagraphs)
+            runner.validate_graph_capture_args(args, kwargs)
+
+            if dmi_prepare_local_forward_boundary(runner):
+                with dmi_force_eager_unit():
+                    out = runner.func(*args, **kwargs)
+                self.is_first_microbatch = False
+                return out
+
             if self.training and torch.is_grad_enabled():
                 # Trigger Mcore DDP pre-forward hooks
                 self.call_ddp_preforward_hook(megatron_module)
                 for module in megatron_module.modules():
                     self.call_ddp_preforward_hook(module)
 
-            runner = self.get_cudagraph_runner(megatron_module, args, kwargs, self.reuse_cudagraphs)
-            out = runner.replay_graph_capture(self.is_first_microbatch, args, kwargs)
+            dmi_prepare_local_forward_replay(runner)
+            out = runner.replay_graph_capture(
+                self.is_first_microbatch, args, kwargs, validate_args=False
+            )
         else:
             if is_inference_mode:
                 # Inference generation mode creates graphs immediately
@@ -1651,8 +1690,19 @@ class CudaGraphManager(torch.nn.Module):
                         (runner, "fwd", args, kwargs)
                     )
 
-                # Now replay the graph
-                out = runner.replay_graph_capture(self.is_first_microbatch, args, kwargs)
+                # Now replay the graph.  Validate graph arguments before DMI
+                # pre-pushes FIFO metadata, otherwise an argument mismatch could
+                # leave metadata with no matching producer payload.
+                runner.validate_graph_capture_args(args, kwargs)
+                if dmi_prepare_local_forward_boundary(runner):
+                    with dmi_force_eager_unit():
+                        out = runner.func(*args, **kwargs)
+                    self.is_first_microbatch = False
+                    return out
+                dmi_prepare_local_forward_replay(runner)
+                out = runner.replay_graph_capture(
+                    self.is_first_microbatch, args, kwargs, validate_args=False
+                )
             elif self.training or is_in_checkpoint_fwd:
                 runner = self.get_cudagraph_runner(
                     megatron_module, args, kwargs, self.reuse_cudagraphs
