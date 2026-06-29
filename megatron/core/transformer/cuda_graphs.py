@@ -947,29 +947,35 @@ class _CudaGraphRunner(torch.nn.Module):
         with ctx:
             # warmup again as case graph capture mode may execute a different codepath
             _set_warmup_start()
-            for _ in range(self.num_warmup_steps):
-                with self.get_quantization_context():
+            dmi_begin_cuda_graph_capture(warmup_enabled=True)
+            try:
+                for _ in range(self.num_warmup_steps):
+                    with self.get_quantization_context():
 
-                    def clone_ten(ten):
-                        if not torch.is_tensor(ten):
-                            return ten
-                        return torch.zeros_like(ten).requires_grad_(ten.requires_grad)
+                        def clone_ten(ten):
+                            if not torch.is_tensor(ten):
+                                return ten
+                            return torch.zeros_like(ten).requires_grad_(ten.requires_grad)
 
-                    warmup_args = tree_map(clone_ten, self.fwd_graph_input_args)
-                    warmup_kwargs = tree_map(clone_ten, self.fwd_graph_input_kwargs)
-                    warmup_outputs = self.func(*warmup_args, **warmup_kwargs)
+                        warmup_args = tree_map(clone_ten, self.fwd_graph_input_args)
+                        warmup_kwargs = tree_map(clone_ten, self.fwd_graph_input_kwargs)
+                        warmup_outputs = self.func(*warmup_args, **warmup_kwargs)
 
-                if self.grad_enabled:
-                    warmup_outputs = self.get_tensors(warmup_outputs)
-                    warmup_outputs = tuple(o for o in warmup_outputs if o.requires_grad)
-                    input_tensors = self.get_tensors(warmup_args, warmup_kwargs)
-                    torch.autograd.grad(
-                        outputs=warmup_outputs,
-                        inputs=tuple(i for i in input_tensors if i.requires_grad),
-                        grad_outputs=tuple(torch.zeros_like(o) for o in warmup_outputs),
-                        only_inputs=True,
-                        allow_unused=True,
-                    )
+                    if self.grad_enabled:
+                        warmup_outputs = self.get_tensors(warmup_outputs)
+                        warmup_outputs = tuple(o for o in warmup_outputs if o.requires_grad)
+                        input_tensors = self.get_tensors(warmup_args, warmup_kwargs)
+                        torch.autograd.grad(
+                            outputs=warmup_outputs,
+                            inputs=tuple(i for i in input_tensors if i.requires_grad),
+                            grad_outputs=tuple(torch.zeros_like(o) for o in warmup_outputs),
+                            only_inputs=True,
+                            allow_unused=True,
+                        )
+                dmi_finish_cuda_graph_capture()
+            except Exception:
+                dmi_abort_cuda_graph_capture()
+                raise
 
             _set_warmup_end()
 
