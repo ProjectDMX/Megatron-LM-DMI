@@ -15,16 +15,33 @@ try:
         dmi_abort_cuda_graph_capture,
         dmi_begin_cuda_graph_capture,
         dmi_finish_cuda_graph_capture,
+        dmi_finish_full_iteration_replay,
+        dmi_force_eager_unit,
+        dmi_prepare_full_iteration_replay,
     )
 except Exception:
-    def dmi_begin_cuda_graph_capture(*, warmup_enabled=True):
-        del warmup_enabled
+    def dmi_begin_cuda_graph_capture(*, warmup_enabled=True, full_iteration=False):
+        del warmup_enabled, full_iteration
 
     def dmi_finish_cuda_graph_capture():
         return None
 
     def dmi_abort_cuda_graph_capture():
         pass
+
+    def dmi_prepare_full_iteration_replay(plan, valid_counts_by_microbatch):
+        del plan, valid_counts_by_microbatch
+        return False
+
+    def dmi_finish_full_iteration_replay():
+        pass
+
+    class dmi_force_eager_unit:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
 
 # The below functions traverse through nested data structures (tuples, lists, dicts)
 # present in src and creates a deep copy where all PyTorch tensors are cloned,
@@ -108,6 +125,11 @@ class StaticBufferLoader:
         torch.cuda.current_stream().wait_stream(self.stream)
         return StaticBufferLoader.static_buffers[stage][microbatch]
 
+    @staticmethod
+    def iter_static_buffers(stage, num_microbatches):
+        assert stage in ['training', 'validation']
+        return iter(StaticBufferLoader.static_buffers[stage][:num_microbatches])
+
 
 class FullCudaGraphWrapper:
     """Wrapper class to enable FullIterationCUDAgraph."""
@@ -122,19 +144,51 @@ class FullCudaGraphWrapper:
         self.cuda_graph_warmup_steps = cuda_graph_warmup_steps
         self._dmi_plans = {}
 
+    @staticmethod
+    def _extract_dmi_valid_count(inputs):
+        if isinstance(inputs, tuple) and isinstance(inputs[0], dict):
+            inputs = inputs[0]
+        if not isinstance(inputs, dict):
+            return None
+        valid_count = inputs.get('dmi_valid_count', None)
+        if valid_count is None:
+            return None
+        if isinstance(valid_count, torch.Tensor):
+            return [int(x) for x in valid_count.detach().cpu().view(-1).tolist()]
+        if isinstance(valid_count, (list, tuple)):
+            return [int(x) for x in valid_count]
+        return [int(valid_count)]
+
+    @staticmethod
+    def _record_valid_count(valid_counts_by_microbatch, microbatch, valid_count):
+        if valid_count is None:
+            return
+        previous = valid_counts_by_microbatch[microbatch]
+        if previous is None:
+            valid_counts_by_microbatch[microbatch] = list(valid_count)
+            return
+        if list(previous) != list(valid_count):
+            raise RuntimeError(
+                "DMI full-iteration valid_count mismatch for microbatch "
+                f"{microbatch}: {previous} != {valid_count}"
+            )
+
     def data_read(self, data_iterator, model, training, num_microbatches):
         """Read all microbatch inputs from Dataloader and copy to static buffers."""
+        valid_counts_by_microbatch = [None for _ in range(num_microbatches)]
         if not isinstance(model, list) or len(model) == 1:
             assert not isinstance(data_iterator, list) or len(data_iterator) == 1
             iterator0 = data_iterator if not isinstance(data_iterator, list) else data_iterator[0]
             data_list = []
             if iterator0 is not None:
                 for b in range(num_microbatches):
-                    data_list.append(
-                        self.static_loader(
-                            next(iterator0), 'training' if training else 'validation', b
-                        )
+                    inputs = next(iterator0)
+                    self._record_valid_count(
+                        valid_counts_by_microbatch,
+                        b,
+                        self._extract_dmi_valid_count(inputs),
                     )
+                    data_list.append(self.static_loader(inputs, 'training' if training else 'validation', b))
                 data_list = [iter(data_list)]
             else:
                 data_list.append(None)
@@ -145,15 +199,32 @@ class FullCudaGraphWrapper:
                 if data_iterator[i] is not None:
                     data_list_i = []
                     for b in range(num_microbatches):
-                        data_list_i.append(
-                            self.static_loader(
-                                next(data_iterator[i]), 'training' if training else 'validation', b
-                            )
+                        inputs = next(data_iterator[i])
+                        self._record_valid_count(
+                            valid_counts_by_microbatch,
+                            b,
+                            self._extract_dmi_valid_count(inputs),
                         )
+                        data_list_i.append(self.static_loader(inputs, 'training' if training else 'validation', b))
                     data_list.append(iter(data_list_i))
                 else:
                     data_list.append(None)
-        return data_list
+        return data_list, valid_counts_by_microbatch
+
+    def static_data_list(self, data_iterator, model, training, num_microbatches):
+        """Rebuild data iterators over static buffers without re-reading the dataloader."""
+        stage = 'training' if training else 'validation'
+        if not isinstance(model, list) or len(model) == 1:
+            iterator0 = data_iterator if not isinstance(data_iterator, list) else data_iterator[0]
+            return [self.static_loader.iter_static_buffers(stage, num_microbatches)] if iterator0 is not None else [None]
+
+        assert isinstance(data_iterator, list) and len(data_iterator) == len(model)
+        return [
+            self.static_loader.iter_static_buffers(stage, num_microbatches)
+            if data_iterator[i] is not None
+            else None
+            for i in range(len(model))
+        ]
 
     def __call__(self, *args, **kwargs):
         assert len(args) == 0, 'forward_backward_func does not accept positional args'
@@ -174,7 +245,9 @@ class FullCudaGraphWrapper:
 
         training = not kwargs['forward_only']
         data_iterator = kwargs['data_iterator']
-        data_list = self.data_read(data_iterator, model, training, num_microbatches)
+        data_list, valid_counts_by_microbatch = self.data_read(
+            data_iterator, model, training, num_microbatches
+        )
         kwargs['data_iterator'] = data_list
 
         training_str = 'training' if training else 'validation'
@@ -188,7 +261,7 @@ class FullCudaGraphWrapper:
                 FullCudaGraphWrapper.cuda_graph[training_str].register_generator_state(state)
             torch.cuda.synchronize()
             capture_stream = torch.cuda.Stream()
-            dmi_begin_cuda_graph_capture(warmup_enabled=True)
+            dmi_begin_cuda_graph_capture(warmup_enabled=True, full_iteration=True)
             try:
                 with torch.cuda.graph(
                     FullCudaGraphWrapper.cuda_graph[training_str],
@@ -211,7 +284,25 @@ class FullCudaGraphWrapper:
         if FullCudaGraphWrapper.cuda_graph[training_str] is None:
             FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(*args, **kwargs)
         else:
-            FullCudaGraphWrapper.cuda_graph[training_str].replay()
+            dmi_plan = self._dmi_plans.get(training_str, None)
+            fallback_to_eager = dmi_prepare_full_iteration_replay(
+                dmi_plan,
+                valid_counts_by_microbatch,
+            ) if dmi_plan is not None else False
+            if fallback_to_eager:
+                kwargs['data_iterator'] = self.static_data_list(
+                    data_iterator,
+                    model,
+                    training,
+                    num_microbatches,
+                )
+                with dmi_force_eager_unit():
+                    FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(
+                        *args, **kwargs
+                    )
+            else:
+                FullCudaGraphWrapper.cuda_graph[training_str].replay()
+                dmi_finish_full_iteration_replay()
 
         self.next_iter(training_str)
         return FullCudaGraphWrapper.result[training_str]
