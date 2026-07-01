@@ -1040,6 +1040,8 @@ def pretrain(
             model_config=config,
             printer=print_rank_0,
         )
+        if args.perform_rl_step:
+            raise NotImplementedError("DMI training phase tracking does not support RL/rollout paths yet")
 
     # Build a separate inference model for RL if requested.
     inference_model = None
@@ -1246,6 +1248,17 @@ def pretrain(
                 training_model=rl_training_model,
             )
         else:
+            if dmi_handle is not None:
+                from integration.megatron_schedule_runtime import dmi_enter_phase
+
+                dmi_enter_phase(
+                    "valid",
+                    training_iteration_id_start=max(1, int(iteration)),
+                    training_iteration_id_end=max(1, int(iteration)) + 1,
+                    global_batch_id_start=max(
+                        1, int(args.consumed_valid_samples // args.global_batch_size) + 1
+                    ),
+                )
             evaluate_and_print_results(
                 prefix, forward_step_func,
                 valid_data_iterator, model,
@@ -1256,6 +1269,15 @@ def pretrain(
 
     if args.do_test:
         prefix = f'iteration {iteration} on test set'
+        if dmi_handle is not None:
+            from integration.megatron_schedule_runtime import dmi_enter_phase
+
+            dmi_enter_phase(
+                "test",
+                training_iteration_id_start=max(1, int(iteration)),
+                training_iteration_id_end=max(1, int(iteration)) + 1,
+                global_batch_id_start=1,
+            )
         evaluate_and_print_results(
             prefix,
             forward_step_func,
@@ -2876,6 +2898,15 @@ def train(
         prof.start()
 
     start_iteration = iteration
+    if getattr(args, "dmi_enable", None) or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
+        from integration.megatron_schedule_runtime import dmi_enter_phase
+
+        dmi_enter_phase(
+            "train",
+            training_iteration_id_start=max(1, int(iteration) + 1),
+            training_iteration_id_end=max(1, int(iteration) + 1),
+            global_batch_id_start=max(1, int(iteration) + 1),
+        )
     # Disable forward pre-hook to start training to ensure that errors in checkpoint loading
     # or random initialization don't propagate to all ranks in first all-gather (which is a
     # no-op if things work correctly).
@@ -3166,6 +3197,17 @@ def train(
                 # Collect all objects.
                 gc.collect()
             prefix = f'iteration {iteration}'
+            if getattr(args, "dmi_enable", None) or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
+                from integration.megatron_schedule_runtime import dmi_enter_phase
+
+                dmi_enter_phase(
+                    "valid",
+                    training_iteration_id_start=max(1, int(iteration)),
+                    training_iteration_id_end=max(1, int(iteration)) + 1,
+                    global_batch_id_start=max(
+                        1, int(args.consumed_valid_samples // args.global_batch_size) + 1
+                    ),
+                )
             timers('eval-time', log_level=0).start(barrier=True)
             if args.perform_rl_step:
                 rl_eval_model = model
@@ -3211,6 +3253,16 @@ def train(
                 energy_monitor.resume()
             if args.num_experts is not None:
                 clear_aux_losses_tracker()
+
+            if getattr(args, "dmi_enable", None) or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
+                from integration.megatron_schedule_runtime import dmi_enter_phase
+
+                dmi_enter_phase(
+                    "train",
+                    training_iteration_id_start=max(1, int(iteration) + 1),
+                    training_iteration_id_end=max(1, int(iteration) + 1),
+                    global_batch_id_start=max(1, int(iteration) + 1),
+                )
 
         # Miscellaneous post-training-step functions (e.g., FT heartbeats, GC).
         # Some of these only happen at specific iterations. Capture updated FLOPs accumulator
