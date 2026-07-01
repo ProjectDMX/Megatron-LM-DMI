@@ -57,8 +57,8 @@ try:
         dmi_record_current_microbatch_metadata,
     )
 except Exception:
-    def dmi_record_current_microbatch_metadata(valid_count):
-        del valid_count
+    def dmi_record_current_microbatch_metadata(valid_count, valid_count_cpu=None):
+        del valid_count, valid_count_cpu
 
     def dmi_enter_current_scope():
         pass
@@ -144,7 +144,10 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     local_cp_size = batch.pop('local_cp_size', None)
     # DMI-only metadata.  Keep it out of Megatron's native model/loss tuple;
     # the DMI schedule/context layer consumes it before model execution.
-    dmi_record_current_microbatch_metadata(batch.pop('dmi_valid_count', None))
+    dmi_record_current_microbatch_metadata(
+        batch.pop('dmi_valid_count', None),
+        batch.pop('dmi_valid_count_cpu', None),
+    )
     if local_cp_size is not None:
         local_cp_size = int(local_cp_size.item())
 

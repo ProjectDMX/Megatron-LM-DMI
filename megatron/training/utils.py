@@ -549,6 +549,15 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             non_blocking=True,
         ).view(-1).contiguous()
 
+    def _cpu_dmi_valid_count(valid_count=None):
+        if valid_count is None:
+            return None
+        if not isinstance(valid_count, torch.Tensor):
+            valid_count = torch.as_tensor(valid_count, dtype=torch.int64)
+        if valid_count.is_cuda:
+            raise RuntimeError("DMI CPU valid_count metadata must not be recovered from CUDA")
+        return valid_count.to(device="cpu", dtype=torch.int64).view(-1).contiguous()
+
     def _broadcast_dmi_valid_count(valid_count=None):
         if _tp_world_size_is_one():
             return _local_dmi_valid_count(valid_count)
@@ -577,6 +586,8 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
 
         assert data_iterator is not None
         data = next(data_iterator)
+        dmi_valid_count_raw = data.get("dmi_valid_count", None)
+        dmi_valid_count_cpu_raw = data.get("dmi_valid_count_cpu", dmi_valid_count_raw)
         batch = {
             'tokens': data["tokens"].cuda(non_blocking=True),
             'labels': data["labels"].cuda(non_blocking=True),
@@ -604,7 +615,8 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             ),
             # DMI-only metadata.  It is consumed by the DMI context layer and
             # removed before Megatron's native model/loss tuple is returned.
-            'dmi_valid_count': data.get("dmi_valid_count", None),
+            'dmi_valid_count': dmi_valid_count_raw,
+            'dmi_valid_count_cpu': _cpu_dmi_valid_count(dmi_valid_count_cpu_raw),
         }
 
         def _broadcast_cu_seqlens(cu_seqlens):
@@ -709,6 +721,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             device=torch.cuda.current_device(),
         ) if args.hybrid_context_parallel else None
         dmi_valid_count = None
+        dmi_valid_count_cpu = None
 
         def _broadcast_cu_seqlens():
             dev = torch.cuda.current_device()
@@ -771,6 +784,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             'max_seqlen': max_seqlen,
             'local_cp_size': local_cp_size,
             'dmi_valid_count': dmi_valid_count,
+            'dmi_valid_count_cpu': dmi_valid_count_cpu,
         }
 
     return batch

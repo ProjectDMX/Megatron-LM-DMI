@@ -163,10 +163,23 @@ class FullCudaGraphWrapper:
         if valid_count is None:
             return None
         if isinstance(valid_count, torch.Tensor):
-            return [int(x) for x in valid_count.detach().cpu().view(-1).tolist()]
+            if valid_count.is_cuda:
+                raise RuntimeError(
+                    "DMI full-iteration valid_count metadata must be CPU; "
+                    "do not recover it from CUDA dmi_valid_count"
+                )
+            return [int(x) for x in valid_count.detach().view(-1).tolist()]
         if isinstance(valid_count, (list, tuple)):
             return [int(x) for x in valid_count]
         return [int(valid_count)]
+
+    @staticmethod
+    def _strip_dmi_metadata(inputs):
+        if isinstance(inputs, tuple) and isinstance(inputs[0], dict):
+            return (FullCudaGraphWrapper._strip_dmi_metadata(inputs[0]), *inputs[1:])
+        if not isinstance(inputs, dict):
+            return inputs
+        return {k: v for k, v in inputs.items() if not k.startswith('dmi_')}
 
     @staticmethod
     def _record_valid_count(valid_counts_by_microbatch, microbatch, valid_count):
@@ -197,7 +210,13 @@ class FullCudaGraphWrapper:
                         b,
                         self._extract_dmi_valid_count(inputs),
                     )
-                    data_list.append(self.static_loader(inputs, 'training' if training else 'validation', b))
+                    data_list.append(
+                        self.static_loader(
+                            self._strip_dmi_metadata(inputs),
+                            'training' if training else 'validation',
+                            b,
+                        )
+                    )
                 data_list = [iter(data_list)]
             else:
                 data_list.append(None)
@@ -214,7 +233,13 @@ class FullCudaGraphWrapper:
                             b,
                             self._extract_dmi_valid_count(inputs),
                         )
-                        data_list_i.append(self.static_loader(inputs, 'training' if training else 'validation', b))
+                        data_list_i.append(
+                            self.static_loader(
+                                self._strip_dmi_metadata(inputs),
+                                'training' if training else 'validation',
+                                b,
+                            )
+                        )
                     data_list.append(iter(data_list_i))
                 else:
                     data_list.append(None)
@@ -254,11 +279,6 @@ class FullCudaGraphWrapper:
 
         training = not kwargs['forward_only']
         data_iterator = kwargs['data_iterator']
-        data_list, valid_counts_by_microbatch = self.data_read(
-            data_iterator, model, training, num_microbatches
-        )
-        kwargs['data_iterator'] = data_list
-
         training_str = 'training' if training else dmi_current_phase(default='validation')
         if training_str not in FullCudaGraphWrapper.curr_iteration:
             FullCudaGraphWrapper.curr_iteration[training_str] = 0
@@ -266,6 +286,23 @@ class FullCudaGraphWrapper:
             FullCudaGraphWrapper.result[training_str] = None
             FullCudaGraphWrapper.dmi_plans[training_str] = None
         curr_iteration = self.curr_iter(training_str)
+
+        if (
+            FullCudaGraphWrapper.cuda_graph[training_str] is None
+            and curr_iteration < self.cuda_graph_warmup_steps
+        ):
+            # Megatron full-iteration pre-capture warmup is a real eager
+            # training/eval execution on real data.  Do not run data_read() here:
+            # DMI metadata must flow through the normal get_batch() path.
+            FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(*args, **kwargs)
+            self.next_iter(training_str)
+            return FullCudaGraphWrapper.result[training_str]
+
+        data_list, valid_counts_by_microbatch = self.data_read(
+            data_iterator, model, training, num_microbatches
+        )
+        kwargs['data_iterator'] = data_list
+
         if curr_iteration == self.cuda_graph_warmup_steps:
             logger.info(f'Capture CUDA graph for {training_str}!!!')
             torch.distributed.barrier()
@@ -276,6 +313,12 @@ class FullCudaGraphWrapper:
             torch.cuda.synchronize()
             capture_stream = torch.cuda.Stream()
             dmi_begin_cuda_graph_capture(
+                # Megatron's capture-boundary call runs real data twice: once
+                # inside torch.cuda.graph(...) to capture, then once via the
+                # immediate replay below.  DMI warmup_enabled is therefore a
+                # transport-null flag for the capture body: record the plan, but
+                # suppress capture-body payload emission so the immediate replay
+                # emits exactly one DMI row set for this logical unit.
                 warmup_enabled=True,
                 full_iteration=True,
                 valid_counts_by_microbatch=valid_counts_by_microbatch,
