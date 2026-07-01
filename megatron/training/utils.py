@@ -533,7 +533,25 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
                 group=mpu.get_tensor_model_parallel_group(),
             )
 
+    def _tp_world_size_is_one():
+        return mpu.get_tensor_model_parallel_world_size() == 1
+
+    def _local_dmi_valid_count(valid_count=None):
+        if valid_count is None:
+            return None
+        if not isinstance(valid_count, torch.Tensor):
+            valid_count = torch.as_tensor(valid_count, dtype=torch.int64)
+        if valid_count.is_cuda:
+            return valid_count.to(dtype=torch.int64).view(-1).contiguous()
+        return valid_count.to(
+            device=torch.cuda.current_device(),
+            dtype=torch.int64,
+            non_blocking=True,
+        ).view(-1).contiguous()
+
     def _broadcast_dmi_valid_count(valid_count=None):
+        if _tp_world_size_is_one():
+            return _local_dmi_valid_count(valid_count)
         dev = torch.cuda.current_device()
         has_valid_count = torch.tensor(
             0 if valid_count is None else 1,
@@ -590,6 +608,8 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         }
 
         def _broadcast_cu_seqlens(cu_seqlens):
+            if _tp_world_size_is_one():
+                return
             dev = torch.cuda.current_device()
             n = 0 if cu_seqlens is None else int(cu_seqlens.numel())
             n_tensor = torch.tensor(n, dtype=torch.int64, device=dev)

@@ -1248,7 +1248,7 @@ def pretrain(
                 training_model=rl_training_model,
             )
         else:
-            if dmi_handle is not None:
+            if getattr(args, "dmi_enable", None) or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
                 from integration.megatron_schedule_runtime import dmi_enter_phase
 
                 dmi_enter_phase(
@@ -1269,7 +1269,7 @@ def pretrain(
 
     if args.do_test:
         prefix = f'iteration {iteration} on test set'
-        if dmi_handle is not None:
+        if getattr(args, "dmi_enable", None) or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
             from integration.megatron_schedule_runtime import dmi_enter_phase
 
             dmi_enter_phase(
@@ -3254,7 +3254,14 @@ def train(
             if args.num_experts is not None:
                 clear_aux_losses_tracker()
 
-            if getattr(args, "dmi_enable", None) or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
+            if (
+                iteration < args.train_iters
+                and (
+                    getattr(args, "dmi_enable", None)
+                    or str(os.getenv("DMI_ENABLE", "")).strip().lower()
+                    in ("1", "true", "yes", "on")
+                )
+            ):
                 from integration.megatron_schedule_runtime import dmi_enter_phase
 
                 dmi_enter_phase(

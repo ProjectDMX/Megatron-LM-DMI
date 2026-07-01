@@ -14,17 +14,26 @@ try:
     from integration.megatron_schedule_runtime import (
         dmi_abort_cuda_graph_capture,
         dmi_begin_cuda_graph_capture,
+        dmi_current_phase,
         dmi_finish_cuda_graph_capture,
         dmi_finish_full_iteration_replay,
         dmi_force_eager_unit,
         dmi_prepare_full_iteration_replay,
     )
 except Exception:
-    def dmi_begin_cuda_graph_capture(*, warmup_enabled=True, full_iteration=False):
-        del warmup_enabled, full_iteration
+    def dmi_begin_cuda_graph_capture(
+        *,
+        warmup_enabled=True,
+        full_iteration=False,
+        valid_counts_by_microbatch=None,
+    ):
+        del warmup_enabled, full_iteration, valid_counts_by_microbatch
 
     def dmi_finish_cuda_graph_capture():
         return None
+
+    def dmi_current_phase(default="validation"):
+        return str(default)
 
     def dmi_abort_cuda_graph_capture():
         pass
@@ -137,12 +146,12 @@ class FullCudaGraphWrapper:
     curr_iteration = {'training': 0, 'validation': 0}
     cuda_graph = {'training': None, 'validation': None}
     result = {'training': None, 'validation': None}
+    dmi_plans = {'training': None, 'validation': None}
 
     def __init__(self, forward_backward_func, cuda_graph_warmup_steps=1):
         self.forward_backward_func = forward_backward_func
         self.static_loader = StaticBufferLoader()
         self.cuda_graph_warmup_steps = cuda_graph_warmup_steps
-        self._dmi_plans = {}
 
     @staticmethod
     def _extract_dmi_valid_count(inputs):
@@ -250,7 +259,12 @@ class FullCudaGraphWrapper:
         )
         kwargs['data_iterator'] = data_list
 
-        training_str = 'training' if training else 'validation'
+        training_str = 'training' if training else dmi_current_phase(default='validation')
+        if training_str not in FullCudaGraphWrapper.curr_iteration:
+            FullCudaGraphWrapper.curr_iteration[training_str] = 0
+            FullCudaGraphWrapper.cuda_graph[training_str] = None
+            FullCudaGraphWrapper.result[training_str] = None
+            FullCudaGraphWrapper.dmi_plans[training_str] = None
         curr_iteration = self.curr_iter(training_str)
         if curr_iteration == self.cuda_graph_warmup_steps:
             logger.info(f'Capture CUDA graph for {training_str}!!!')
@@ -261,7 +275,11 @@ class FullCudaGraphWrapper:
                 FullCudaGraphWrapper.cuda_graph[training_str].register_generator_state(state)
             torch.cuda.synchronize()
             capture_stream = torch.cuda.Stream()
-            dmi_begin_cuda_graph_capture(warmup_enabled=True, full_iteration=True)
+            dmi_begin_cuda_graph_capture(
+                warmup_enabled=True,
+                full_iteration=True,
+                valid_counts_by_microbatch=valid_counts_by_microbatch,
+            )
             try:
                 with torch.cuda.graph(
                     FullCudaGraphWrapper.cuda_graph[training_str],
@@ -273,7 +291,7 @@ class FullCudaGraphWrapper:
                     )
                 dmi_plan = dmi_finish_cuda_graph_capture()
                 if dmi_plan is not None:
-                    self._dmi_plans[training_str] = dmi_plan
+                    FullCudaGraphWrapper.dmi_plans[training_str] = dmi_plan
             except Exception:
                 dmi_abort_cuda_graph_capture()
                 raise
@@ -284,7 +302,7 @@ class FullCudaGraphWrapper:
         if FullCudaGraphWrapper.cuda_graph[training_str] is None:
             FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(*args, **kwargs)
         else:
-            dmi_plan = self._dmi_plans.get(training_str, None)
+            dmi_plan = FullCudaGraphWrapper.dmi_plans.get(training_str, None)
             fallback_to_eager = dmi_prepare_full_iteration_replay(
                 dmi_plan,
                 valid_counts_by_microbatch,
