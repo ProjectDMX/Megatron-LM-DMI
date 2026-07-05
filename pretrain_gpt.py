@@ -203,6 +203,16 @@ def loss_func(
     """
     args = get_args()
 
+    # DMI loss-summary is a side-effect hook.  Keep it before the native
+    # ModelOpt/non-ModelOpt branches so it observes the dense [B, S] per-token
+    # loss tensor before any flattening or aggregate reduction.
+    if model is not None:
+        dmi_loss_hook = get_attr_wrapped_model(
+            model, "dmi_lm_per_sample_loss", allow_none=True
+        )
+        if dmi_loss_hook is not None:
+            dmi_loss_hook(output_tensor, loss_mask)
+
     if has_nvidia_modelopt and getattr(args, 'modelopt_enabled', False):  # [ModelOpt]
         loss, num_tokens, report = loss_func_modelopt(loss_mask, output_tensor, model=model)
     else:
