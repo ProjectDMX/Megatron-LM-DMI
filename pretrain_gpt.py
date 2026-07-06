@@ -52,11 +52,25 @@ from megatron.training.utils import (
 from model_provider import model_provider
 
 try:
+    from integration.megatron_hook_requirements import (
+        hook_selection_requires_valid_count,
+        parse_hook_selection,
+    )
     from integration.megatron_schedule_runtime import (
         dmi_enter_current_scope,
         dmi_record_current_microbatch_metadata,
     )
 except Exception:
+    def parse_hook_selection(selection, *, default="router-summary"):
+        selected = {part.strip() for part in str(selection if selection is not None else default).split(",")}
+        if "" in selected:
+            raise ValueError(f"Invalid empty DMI hook selection entry: {selection!r}")
+        return selected
+
+    def hook_selection_requires_valid_count(selection):
+        del selection
+        return True
+
     def dmi_record_current_microbatch_metadata(valid_count, valid_count_cpu=None):
         del valid_count, valid_count_cpu
 
@@ -72,6 +86,31 @@ except ImportError:
     has_nvidia_modelopt = False
 
 stimer = StragglerDetector()
+
+
+def _dmi_is_enabled(args) -> bool:
+    return bool(
+        getattr(args, "dmi_enable", None)
+        or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on")
+    )
+
+
+def _dmi_selected_hooks(args) -> set[str]:
+    selection = getattr(args, "dmi_hook_selection", None)
+    if selection is None:
+        selection = os.getenv("DMI_HOOK_SELECTION", "router-summary")
+    return parse_hook_selection(selection)
+
+
+def _dmi_hook_selected(args, name: str) -> bool:
+    return name in _dmi_selected_hooks(args)
+
+
+def _dmi_needs_valid_count(args) -> bool:
+    selection = getattr(args, "dmi_hook_selection", None)
+    if selection is None:
+        selection = os.getenv("DMI_HOOK_SELECTION", "router-summary")
+    return hook_selection_requires_valid_count(selection)
 
 
 def get_batch(data_iterator, vp_stage: Optional[int] = None):
@@ -144,10 +183,10 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     local_cp_size = batch.pop('local_cp_size', None)
     # DMI-only metadata.  Keep it out of Megatron's native model/loss tuple;
     # the DMI schedule/context layer consumes it before model execution.
-    dmi_record_current_microbatch_metadata(
-        batch.pop('dmi_valid_count', None),
-        batch.pop('dmi_valid_count_cpu', None),
-    )
+    dmi_valid_count = batch.pop('dmi_valid_count', None)
+    dmi_valid_count_cpu = batch.pop('dmi_valid_count_cpu', None)
+    if _dmi_is_enabled(args) and _dmi_needs_valid_count(args):
+        dmi_record_current_microbatch_metadata(dmi_valid_count, dmi_valid_count_cpu)
     if local_cp_size is not None:
         local_cp_size = int(local_cp_size.item())
 
@@ -206,12 +245,16 @@ def loss_func(
     # DMI loss-summary is a side-effect hook.  Keep it before the native
     # ModelOpt/non-ModelOpt branches so it observes the dense [B, S] per-token
     # loss tensor before any flattening or aggregate reduction.
-    if model is not None:
+    if _dmi_is_enabled(args) and _dmi_hook_selected(args, "loss-summary") and model is not None:
+        if not output_tensor.is_cuda or not loss_mask.is_cuda:
+            raise RuntimeError(
+                "DMI loss-summary requires CUDA output_tensor and loss_mask; "
+                f"got output_tensor.device={output_tensor.device}, loss_mask.device={loss_mask.device}"
+            )
         dmi_loss_hook = get_attr_wrapped_model(
-            model, "dmi_lm_per_sample_loss", allow_none=True
+            model, "dmi_lm_per_sample_loss", allow_none=False
         )
-        if dmi_loss_hook is not None:
-            dmi_loss_hook(output_tensor, loss_mask)
+        dmi_loss_hook(output_tensor, loss_mask)
 
     if has_nvidia_modelopt and getattr(args, 'modelopt_enabled', False):  # [ModelOpt]
         loss, num_tokens, report = loss_func_modelopt(loss_mask, output_tensor, model=model)
@@ -275,7 +318,8 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
         vp_stage = get_attr_wrapped_model(model, "vp_stage")
         tokens, labels, loss_mask, attention_mask, position_ids, packed_seq_params = get_batch(data_iterator, vp_stage)
     timers('batch-generator').stop()
-    dmi_enter_current_scope()
+    if _dmi_is_enabled(args):
+        dmi_enter_current_scope()
 
     with stimer:
         if args.use_legacy_models:
@@ -349,6 +393,7 @@ def core_gpt_dataset_config_from_args(args):
         "data_parallel_size": args.data_parallel_size,
         "sequence_parallel_size": args.tensor_model_parallel_size*args.sequence_parallel,
         "hybrid_context_parallel": args.hybrid_context_parallel,
+        "dmi_metadata_enabled": _dmi_is_enabled(args) and _dmi_needs_valid_count(args),
     }
 
     # add FIM args to the config
