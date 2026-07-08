@@ -301,6 +301,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             )
         self.hidden_dropout = config.hidden_dropout if hidden_dropout is None else hidden_dropout
         self.is_mtp_layer = is_mtp_layer
+        self.dmi_hidden_states = None
 
         # [Module 1: Input Layernorm] Optional Layernorm on the input data
         # TODO: add pytorch only layernorm
@@ -700,6 +701,11 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         This method calls the core computation of a transformer layer, including
         self-attention, cross-attention (if applicable), and feed-forward operations.
         """
+        if self.dmi_hidden_states is not None:
+            if len(args) > 0:
+                self.dmi_hidden_states(args[0])
+            else:
+                self.dmi_hidden_states(kwargs["hidden_states"])
         hidden_states, context = self._forward_attention(*args, **kwargs)
         output = self._forward_mlp(
             hidden_states,

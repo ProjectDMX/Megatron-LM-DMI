@@ -39,7 +39,6 @@ from megatron.core.utils import (
     is_using_quantization_scales,
 )
 
-
 class GPTModel(LanguageModule):
     """GPT Transformer language model.
 
@@ -546,7 +545,6 @@ class GPTModel(LanguageModule):
             padding_mask=padding_mask,
             **(extra_block_kwargs or {}),
         )
-
         return self._postprocess(
             hidden_states=hidden_states,
             input_ids=input_ids,

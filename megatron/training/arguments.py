@@ -3399,5 +3399,29 @@ def _add_dmi_args(parser):
         default=None,
         help='DMI emission policy across TP/EP/CP ranks.',
     )
+    group.add_argument(
+        '--dmi-profile',
+        action='store_true',
+        default=None,
+        help='Enable opt-in DMI profiling.',
+    )
+    group.add_argument(
+        '--dmi-profile-cpu',
+        action='store_true',
+        default=None,
+        help='Enable DMI CPU-side profiling when --dmi-profile is set.',
+    )
+    group.add_argument(
+        '--dmi-profile-cuda',
+        action='store_true',
+        default=None,
+        help='Enable DMI CUDA-event profiling when --dmi-profile is set.',
+    )
+    group.add_argument(
+        '--dmi-profile-output-dir',
+        type=str,
+        default=None,
+        help='Output directory for DMI profile JSONL files.',
+    )
 
     return parser

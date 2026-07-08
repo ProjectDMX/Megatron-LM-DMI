@@ -76,6 +76,9 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     context_parallel_size: Optional[int] = None
     """The size of the context parallel group. Needed for padding in packed sequences."""
 
+    dmi_metadata_enabled: bool = False
+    """Option to emit DMI-only metadata fields in dataset samples."""
+
     def __post_init__(self) -> None:
         """Do asserts and set fields post init"""
         super().__post_init__()
@@ -271,9 +274,10 @@ class GPTDataset(MegatronDataset):
         # For padded sequences, mask the loss
         loss_mask[labels == self._pad_token_id] = 0.0
 
-        # DMI-only metadata: strict non-pad input-token count before the
-        # embedding-safe pad rewrite below.  This is not a loss-token count.
-        dmi_valid_count = torch.count_nonzero(tokens != self._pad_token_id).to(torch.int64)
+        if self.config.dmi_metadata_enabled:
+            # DMI-only metadata: strict non-pad input-token count before the
+            # embedding-safe pad rewrite below.  This is not a loss-token count.
+            dmi_valid_count = torch.count_nonzero(tokens != self._pad_token_id).to(torch.int64)
 
         # For padded sequences, ensure the embedding layer can map the token ID
         tokens[tokens == self._pad_token_id] = 0
@@ -282,25 +286,27 @@ class GPTDataset(MegatronDataset):
         # Batch padding sequence so we mask the loss
         if idx is None:
             loss_mask = torch.zeros_like(loss_mask)
-            dmi_valid_count = torch.zeros_like(dmi_valid_count)
+            if self.config.dmi_metadata_enabled:
+                dmi_valid_count = torch.zeros_like(dmi_valid_count)
 
         if self.config.create_attention_mask:
-            return {
+            sample = {
                 "tokens": tokens,
                 "labels": labels,
                 "attention_mask": attention_mask,
                 "loss_mask": loss_mask,
                 "position_ids": position_ids,
-                "dmi_valid_count": dmi_valid_count,
             }
         else:
-            return {
+            sample = {
                 "tokens": tokens,
                 "labels": labels,
                 "loss_mask": loss_mask,
                 "position_ids": position_ids,
-                "dmi_valid_count": dmi_valid_count,
             }
+        if self.config.dmi_metadata_enabled:
+            sample["dmi_valid_count"] = dmi_valid_count
+        return sample
 
     def _query_document_sample_shuffle_indices(
         self, idx: int

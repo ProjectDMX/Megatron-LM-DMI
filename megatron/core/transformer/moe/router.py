@@ -26,22 +26,6 @@ from megatron.core.transformer.moe.moe_utils import (
 from megatron.core.transformer.moe.router_replay import RouterReplay
 from megatron.core.transformer.transformer_config import TransformerConfig
 
-try:
-    from integration.megatron_router_summary import router_probs_mean_from_logits
-    from monitoring.hook_point_v1 import (
-        DimSpec,
-        HookPointV1,
-        HookSpecV1,
-        OutputSpec,
-        PreprocessSpec,
-        ProducerKind,
-        ShardPolicy,
-    )
-
-    _DMI_ROUTER_SUMMARY_AVAILABLE = True
-except Exception:
-    _DMI_ROUTER_SUMMARY_AVAILABLE = False
-
 
 class Router(ABC, MegatronModule):
     """Base Router class"""
@@ -234,26 +218,6 @@ class TopKRouter(Router):
             self.router_replay = RouterReplay()
 
         self.dmi_router_probs_mean = None
-        if _DMI_ROUTER_SUMMARY_AVAILABLE:
-            self.dmi_router_probs_mean = HookPointV1(
-                HookSpecV1(
-                    name="router_probs_mean",
-                    layer_no=-1,
-                    outputs=[
-                        OutputSpec(
-                            name="router_probs_mean",
-                            shape=[DimSpec.BATCH, DimSpec.NUM_EXPERTS],
-                            dtype=torch.float32,
-                            producer=ProducerKind.STATIC,
-                        )
-                    ],
-                    preprocess=PreprocessSpec(self._dmi_router_probs_mean_from_logits),
-                    shard_policy=ShardPolicy.REPLICATED,
-                    enabled_by=frozenset({"router-summary"}),
-                )
-            )
-            self.dmi_router_probs_mean.valid_count_fwd = torch.empty(0, dtype=torch.int64)
-            self.dmi_router_probs_mean.valid_count_bwd = torch.empty(0, dtype=torch.int64)
 
     def set_layer_number(self, layer_number: int):
         """Set the layer number for the router."""
@@ -269,6 +233,8 @@ class TopKRouter(Router):
         logits: torch.Tensor,
         valid_count: torch.Tensor,
     ) -> torch.Tensor:
+        from integration.megatron_router_summary import router_probs_mean_from_logits
+
         return router_probs_mean_from_logits(logits, valid_count, self.score_function)
 
     def _maintain_float32_expert_bias(self):
