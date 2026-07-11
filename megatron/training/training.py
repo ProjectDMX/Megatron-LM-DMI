@@ -2098,21 +2098,21 @@ def training_log(
                 global_batch_id=int(iteration),
                 phase="train",
             )
-        if grad_norm is not None:
+        if args.clip_grad > 0.0 and grad_norm is not None:
             dmi_submit_training_scalar_float(
                 "grad_norm",
                 grad_norm,
                 global_batch_id=int(iteration),
                 phase="train",
             )
-        if num_zeros_in_grad is not None:
+        if args.log_num_zeros_in_grad and num_zeros_in_grad is not None:
             dmi_submit_training_scalar_float(
                 "num_zeros",
                 num_zeros_in_grad,
                 global_batch_id=int(iteration),
                 phase="train",
             )
-        if params_norm is not None:
+        if args.log_params_norm and params_norm is not None:
             dmi_submit_training_scalar_float(
                 "params_norm",
                 params_norm,
