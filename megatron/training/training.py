@@ -61,6 +61,11 @@ _LEGACY_TRAIN_START_TIME = time.time() # NOTE(asolergi-nv): Legacy timestamp
 import torch
 
 try:
+    from integration.megatron_schedule_runtime import dmi_submit_training_scalar_float
+except Exception:
+    dmi_submit_training_scalar_float = None
+
+try:
     from megatron.rl import rl_utils
     has_rl_utils = True
 except ImportError:
@@ -2083,6 +2088,38 @@ def training_log(
 
     # learning rate will be None on ranks without trainable params, so we must gather across mp ranks
     learning_rate: float | None = reduce_max_stat_across_model_parallel_group(learning_rate)
+
+    if dmi_submit_training_scalar_float is not None and args.rank == args.world_size - 1:
+        for key, value in loss_dict.items():
+            metric_name = str(key).strip().replace(" ", "_").replace("/", "_")
+            dmi_submit_training_scalar_float(
+                f"{metric_name}_iteration",
+                value,
+                global_batch_id=int(iteration),
+                phase="train",
+            )
+        if grad_norm is not None:
+            dmi_submit_training_scalar_float(
+                "grad_norm",
+                grad_norm,
+                global_batch_id=int(iteration),
+                phase="train",
+            )
+        if num_zeros_in_grad is not None:
+            dmi_submit_training_scalar_float(
+                "num_zeros",
+                num_zeros_in_grad,
+                global_batch_id=int(iteration),
+                phase="train",
+            )
+        if params_norm is not None:
+            dmi_submit_training_scalar_float(
+                "params_norm",
+                params_norm,
+                global_batch_id=int(iteration),
+                phase="train",
+            )
+
     # Tensorboard values.
     if writer and (iteration % args.tensorboard_log_interval == 0):
         if wandb_writer:

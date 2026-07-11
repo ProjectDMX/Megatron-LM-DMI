@@ -218,15 +218,21 @@ class TopKRouter(Router):
             self.router_replay = RouterReplay()
 
         self.dmi_router_probs_mean = None
+        self.dmi_router_token_entropy_mean = None
+        self.dmi_pre_drop_token_count = None
+        self.dmi_post_drop_token_count = None
 
     def set_layer_number(self, layer_number: int):
         """Set the layer number for the router."""
         super().set_layer_number(layer_number)
-        if self.dmi_router_probs_mean is not None and self.dmi_router_probs_mean.spec is not None:
-            self.dmi_router_probs_mean.spec = replace(
-                self.dmi_router_probs_mean.spec,
-                layer_no=int(layer_number) - 1,
-            )
+        for hook in (
+            self.dmi_router_probs_mean,
+            self.dmi_router_token_entropy_mean,
+            self.dmi_pre_drop_token_count,
+            self.dmi_post_drop_token_count,
+        ):
+            if hook is not None and hook.spec is not None:
+                hook.spec = replace(hook.spec, layer_no=int(layer_number) - 1)
 
     def _dmi_router_probs_mean_from_logits(
         self,
@@ -236,6 +242,31 @@ class TopKRouter(Router):
         from integration.megatron_router_summary import router_probs_mean_from_logits
 
         return router_probs_mean_from_logits(logits, valid_count, self.score_function)
+
+    def _dmi_router_token_entropy_mean_from_logits(
+        self,
+        logits: torch.Tensor,
+        valid_count: torch.Tensor,
+    ) -> torch.Tensor:
+        from integration.megatron_router_summary import router_token_entropy_mean_from_logits
+
+        return router_token_entropy_mean_from_logits(logits, valid_count, self.score_function)
+
+    def _dmi_expert_token_count_from_routing_map(
+        self,
+        routing_map: torch.Tensor,
+        valid_count: torch.Tensor,
+        seq_length: int,
+        bsz: int,
+    ) -> torch.Tensor:
+        from integration.megatron_router_summary import expert_token_count_from_routing_map
+
+        return expert_token_count_from_routing_map(
+            routing_map,
+            valid_count,
+            seq_length=seq_length,
+            batch_size=bsz,
+        )
 
     def _maintain_float32_expert_bias(self):
         """
@@ -646,6 +677,14 @@ class TopKRouter(Router):
                 router_replay=self.router_replay,
             )
 
+        if self.dmi_pre_drop_token_count is not None:
+            self.dmi_pre_drop_token_count(
+                routing_map,
+                self.dmi_pre_drop_token_count.valid_count_fwd,
+                seq_length,
+                bsz,
+            )
+
         # Apply token dropping to probs and routing_map.
         if self.config.moe_expert_capacity_factor is not None:
             probs, routing_map = apply_router_token_dropping(
@@ -655,6 +694,14 @@ class TopKRouter(Router):
                 capacity_factor=self.config.moe_expert_capacity_factor,
                 drop_policy=self.config.moe_token_drop_policy,
                 pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
+            )
+
+        if self.dmi_post_drop_token_count is not None:
+            self.dmi_post_drop_token_count(
+                routing_map,
+                self.dmi_post_drop_token_count.valid_count_fwd,
+                seq_length,
+                bsz,
             )
 
         # Apply each aux loss type and attach aux loss autograd function to probs
@@ -727,6 +774,11 @@ class TopKRouter(Router):
 
         if self.dmi_router_probs_mean is not None:
             self.dmi_router_probs_mean(logits, self.dmi_router_probs_mean.valid_count_fwd)
+        if self.dmi_router_token_entropy_mean is not None:
+            self.dmi_router_token_entropy_mean(
+                logits,
+                self.dmi_router_token_entropy_mean.valid_count_fwd,
+            )
 
         probs, routing_map = self.routing(logits, padding_mask=padding_mask)
 
