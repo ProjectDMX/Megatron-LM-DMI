@@ -26,8 +26,9 @@ except Exception:
         warmup_enabled=True,
         full_iteration=False,
         valid_counts_by_microbatch=None,
+        capture_direction=None,
     ):
-        del warmup_enabled, full_iteration, valid_counts_by_microbatch
+        del warmup_enabled, full_iteration, valid_counts_by_microbatch, capture_direction
 
     def dmi_finish_cuda_graph_capture():
         return None

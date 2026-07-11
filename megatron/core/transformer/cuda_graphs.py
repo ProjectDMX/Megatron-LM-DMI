@@ -80,8 +80,8 @@ try:
         dmi_take_local_backward_token,
     )
 except Exception:
-    def dmi_begin_cuda_graph_capture(*, warmup_enabled=True):
-        del warmup_enabled
+    def dmi_begin_cuda_graph_capture(*, warmup_enabled=True, capture_direction=None):
+        del warmup_enabled, capture_direction
 
     def dmi_finish_cuda_graph_capture():
         return None
@@ -994,7 +994,10 @@ class _CudaGraphRunner(torch.nn.Module):
                 if FREEZE_GC:
                     gc.freeze()
 
-                dmi_begin_cuda_graph_capture(warmup_enabled=True)
+                dmi_begin_cuda_graph_capture(
+                    warmup_enabled=True,
+                    capture_direction="fwd",
+                )
                 try:
                     with torch.cuda.graph(
                         self.fwd_graph, pool=self.mempool, capture_error_mode="thread_local"
@@ -1118,7 +1121,10 @@ class _CudaGraphRunner(torch.nn.Module):
         if FREEZE_GC:
             gc.freeze()
 
-        dmi_begin_cuda_graph_capture(warmup_enabled=True)
+        dmi_begin_cuda_graph_capture(
+            warmup_enabled=True,
+            capture_direction="bwd",
+        )
         try:
             with torch.cuda.graph(self.bwd_graph, pool=self.mempool):
                 grad_inputs = torch.autograd.grad(
