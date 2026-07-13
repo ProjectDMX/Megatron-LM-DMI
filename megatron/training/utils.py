@@ -258,7 +258,7 @@ def average_losses_across_data_parallel_group(losses):
     return averaged_losses
 
 
-def reduce_max_stat_across_model_parallel_group(stat: float) -> float | None:
+def reduce_max_stat_as_cuda_tensor(stat: float | torch.Tensor | None) -> torch.Tensor:
     """
     Ranks without an optimizer will have no grad_norm or num_zeros_in_grad stats.
     We need to ensure the logging and writer rank has those values.
@@ -266,17 +266,34 @@ def reduce_max_stat_across_model_parallel_group(stat: float) -> float | None:
 
     We use an all_reduce max since the values have already been summed across optimizer ranks where possible
     """
+    device = torch.device("cuda", torch.cuda.current_device())
     if stat is None:
-        stat = -1.0
-    stat = torch.tensor([stat], dtype=torch.float32, device=torch.cuda.current_device())
-    torch.distributed.all_reduce(
-        stat, op=torch.distributed.ReduceOp.MAX, group=mpu.get_model_parallel_group()
-    )
-    if stat.item() == -1.0:
-        # No rank has a valid stat, so return None to indicate that it is None across all ranks.
-        return None
+        stat_tensor = torch.full((1,), -1.0, dtype=torch.float32, device=device)
+    elif isinstance(stat, torch.Tensor):
+        if stat.numel() != 1:
+            raise ValueError("Reduced Megatron stat must contain exactly one value")
+        stat_tensor = stat.detach().to(device=device, dtype=torch.float32).reshape(1).clone()
     else:
-        return stat.item()
+        stat_tensor = torch.tensor([stat], dtype=torch.float32, device=device)
+    torch.distributed.all_reduce(
+        stat_tensor, op=torch.distributed.ReduceOp.MAX, group=mpu.get_model_parallel_group()
+    )
+    return stat_tensor
+
+
+def decode_reduced_stat(stat_tensor: torch.Tensor) -> float | None:
+    if stat_tensor.numel() != 1:
+        raise ValueError("Reduced Megatron stat tensor must contain exactly one value")
+    value = float(stat_tensor.item())
+    return None if value == -1.0 else value
+
+
+def reduce_max_stat_across_model_parallel_group(
+    stat: float | torch.Tensor | None,
+) -> float | None:
+    """Reduce a stat across model-parallel ranks and decode its optional value."""
+
+    return decode_reduced_stat(reduce_max_stat_as_cuda_tensor(stat))
 
 
 def logical_and_across_model_parallel_group(input: bool) -> bool:

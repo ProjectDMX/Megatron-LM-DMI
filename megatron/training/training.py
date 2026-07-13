@@ -61,11 +61,6 @@ _LEGACY_TRAIN_START_TIME = time.time() # NOTE(asolergi-nv): Legacy timestamp
 import torch
 
 try:
-    from integration.megatron_schedule_runtime import dmi_submit_training_scalar_float
-except Exception:
-    dmi_submit_training_scalar_float = None
-
-try:
     from megatron.rl import rl_utils
     has_rl_utils = True
 except ImportError:
@@ -224,8 +219,10 @@ from .utils import (
     append_to_progress_log,
     calc_params_l2_norm,
     check_adlr_autoresume_termination,
+    decode_reduced_stat,
     logical_and_across_model_parallel_group,
     reduce_max_stat_across_model_parallel_group,
+    reduce_max_stat_as_cuda_tensor,
     is_last_rank,
     print_rank_0,
     print_rank_last,
@@ -1206,6 +1203,7 @@ def pretrain(
                 checkpointing_context,
                 non_loss_data_func,
                 inference_model,
+                dmi_handle,
             )
 
         print_datetime('after training is done')
@@ -1820,7 +1818,62 @@ def dummy_train_step(data_iterator):
             batch = get_batch_on_this_cp_rank(batch)
 
 
-def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func, iteration=None):
+def train_step(
+    forward_step_func,
+    data_iterator,
+    model,
+    optimizer,
+    opt_param_scheduler,
+    config,
+    forward_backward_func,
+    iteration=None,
+    dmi_handle=None,
+):
+    if dmi_handle is None:
+        return _train_step_impl(
+            forward_step_func,
+            data_iterator,
+            model,
+            optimizer,
+            opt_param_scheduler,
+            config,
+            forward_backward_func,
+            iteration=iteration,
+            dmi_handle=None,
+        )
+    from integration.megatron_schedule_runtime import (
+        dmi_begin_logical_iteration,
+        dmi_finish_logical_iteration,
+    )
+
+    dmi_begin_logical_iteration(int(iteration) + 1)
+    try:
+        return _train_step_impl(
+            forward_step_func,
+            data_iterator,
+            model,
+            optimizer,
+            opt_param_scheduler,
+            config,
+            forward_backward_func,
+            iteration=iteration,
+            dmi_handle=dmi_handle,
+        )
+    finally:
+        dmi_finish_logical_iteration()
+
+
+def _train_step_impl(
+    forward_step_func,
+    data_iterator,
+    model,
+    optimizer,
+    opt_param_scheduler,
+    config,
+    forward_backward_func,
+    iteration=None,
+    dmi_handle=None,
+):
     """Single training step."""
     args = get_args()
     timers = get_timers()
@@ -1935,9 +1988,17 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     update_successful = logical_and_across_model_parallel_group(update_successful)
     # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
     # so we must gather across mp ranks
-    grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
+    grad_norm_tensor = reduce_max_stat_as_cuda_tensor(grad_norm)
+    if dmi_handle is not None:
+        dmi_handle.emit_grad_norm(
+            grad_norm_tensor,
+            training_iteration_id=int(iteration) + 1,
+        )
+    grad_norm = decode_reduced_stat(grad_norm_tensor)
     if args.log_num_zeros_in_grad:
         num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
+    if dmi_handle is not None and update_successful:
+        dmi_handle.emit_router_weights(model_state_iteration_id=int(iteration) + 1)
 
     # Vision momentum.
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
@@ -2088,37 +2149,6 @@ def training_log(
 
     # learning rate will be None on ranks without trainable params, so we must gather across mp ranks
     learning_rate: float | None = reduce_max_stat_across_model_parallel_group(learning_rate)
-
-    if dmi_submit_training_scalar_float is not None and args.rank == args.world_size - 1:
-        for key, value in loss_dict.items():
-            metric_name = str(key).strip().replace(" ", "_").replace("/", "_")
-            dmi_submit_training_scalar_float(
-                f"{metric_name}_iteration",
-                value,
-                global_batch_id=int(iteration),
-                phase="train",
-            )
-        if args.clip_grad > 0.0 and grad_norm is not None:
-            dmi_submit_training_scalar_float(
-                "grad_norm",
-                grad_norm,
-                global_batch_id=int(iteration),
-                phase="train",
-            )
-        if args.log_num_zeros_in_grad and num_zeros_in_grad is not None:
-            dmi_submit_training_scalar_float(
-                "num_zeros",
-                num_zeros_in_grad,
-                global_batch_id=int(iteration),
-                phase="train",
-            )
-        if args.log_params_norm and params_norm is not None:
-            dmi_submit_training_scalar_float(
-                "params_norm",
-                params_norm,
-                global_batch_id=int(iteration),
-                phase="train",
-            )
 
     # Tensorboard values.
     if writer and (iteration % args.tensorboard_log_interval == 0):
@@ -2689,6 +2719,7 @@ def train(
     checkpointing_context,
     non_loss_data_func,
     inference_model=None,
+    dmi_handle=None,
 ):
     """Training function: run train_step desired number of times, run validation, checkpoint."""
     args = get_args()
@@ -2797,6 +2828,11 @@ def train(
         print_rank_0(f"Overwriting rerun_state_machine.current_iteration from "
                      f"{rerun_state_machine.current_iteration} to {iteration}...")
         rerun_state_machine.current_iteration = iteration
+
+    if dmi_handle is not None:
+        dmi_handle.emit_initial_router_weights(
+            model_state_iteration_id=int(iteration),
+        )
 
     # Track E2E metrics at the start of training.
     one_logger_utils.on_train_start(
@@ -3102,7 +3138,15 @@ def train(
                 num_zeros_in_grad,
                 max_attention_logit,
             ) = train_step(
-                forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func, iteration=iteration
+                forward_step_func,
+                train_data_iterator,
+                model,
+                optimizer,
+                opt_param_scheduler,
+                config,
+                forward_backward_func,
+                iteration=iteration,
+                dmi_handle=dmi_handle,
             )
             ft_integration.on_training_step_end()
         if should_checkpoint:
