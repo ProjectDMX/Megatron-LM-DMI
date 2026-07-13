@@ -3340,6 +3340,27 @@ def _add_dmi_args(parser):
         help='DMI HookPointV1 hook selection name.',
     )
     group.add_argument(
+        '--dmi-recompute-hook',
+        type=str,
+        default=None,
+        help='Comma-separated selected DMI hooks whose recompute emissions are retained.',
+    )
+    group.add_argument(
+        '--dmi-no-recompute-hook',
+        type=str,
+        default=None,
+        help='Comma-separated selected DMI hooks whose recompute emissions are suppressed.',
+    )
+    group.add_argument(
+        '--dmi-dataset-provenance-mode',
+        type=str,
+        default=None,
+        help=(
+            'Dataset provenance policy: auto or an explicit '
+            'train=...,valid=...,test=... map.'
+        ),
+    )
+    group.add_argument(
         '--dmi-model-id',
         type=str,
         default=None,

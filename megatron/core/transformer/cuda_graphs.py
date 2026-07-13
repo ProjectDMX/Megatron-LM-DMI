@@ -1488,6 +1488,10 @@ class CudaGraphManager(torch.nn.Module):
 
             def wrapped_func(*args, **kwargs):
                 out = self(base_module, args, kwargs)
+                # Adapted from NVIDIA/Megatron-LM PR #4425: wrapped single-output
+                # functions must return the tensor, not the graph runner's `(tensor,)`.
+                if isinstance(out, tuple) and len(out) == 1:
+                    return out[0]
                 return out
 
             setattr(base_module, function_name, wrapped_func)

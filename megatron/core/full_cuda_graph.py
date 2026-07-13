@@ -175,12 +175,33 @@ class FullCudaGraphWrapper:
         return [int(valid_count)]
 
     @staticmethod
+    def _extract_dmi_dataset_id(inputs):
+        if isinstance(inputs, tuple) and isinstance(inputs[0], dict):
+            inputs = inputs[0]
+        if not isinstance(inputs, dict):
+            return None
+        dataset_id = inputs.get('dmi_dataset_id_cpu', inputs.get('dataset_id', None))
+        if dataset_id is None:
+            return None
+        if isinstance(dataset_id, torch.Tensor):
+            if dataset_id.is_cuda:
+                raise RuntimeError("DMI full-iteration dataset_id metadata must remain on CPU")
+            return [int(x) for x in dataset_id.detach().view(-1).tolist()]
+        if isinstance(dataset_id, (list, tuple)):
+            return [int(x) for x in dataset_id]
+        return [int(dataset_id)]
+
+    @staticmethod
     def _strip_dmi_metadata(inputs):
         if isinstance(inputs, tuple) and isinstance(inputs[0], dict):
             return (FullCudaGraphWrapper._strip_dmi_metadata(inputs[0]), *inputs[1:])
         if not isinstance(inputs, dict):
             return inputs
-        return {k: v for k, v in inputs.items() if not k.startswith('dmi_')}
+        return {
+            k: v
+            for k, v in inputs.items()
+            if not k.startswith('dmi_') and k != 'dataset_id'
+        }
 
     @staticmethod
     def _record_valid_count(valid_counts_by_microbatch, microbatch, valid_count):
@@ -199,6 +220,7 @@ class FullCudaGraphWrapper:
     def data_read(self, data_iterator, model, training, num_microbatches):
         """Read all microbatch inputs from Dataloader and copy to static buffers."""
         valid_counts_by_microbatch = [None for _ in range(num_microbatches)]
+        dataset_ids_by_microbatch = [None for _ in range(num_microbatches)]
         if not isinstance(model, list) or len(model) == 1:
             assert not isinstance(data_iterator, list) or len(data_iterator) == 1
             iterator0 = data_iterator if not isinstance(data_iterator, list) else data_iterator[0]
@@ -210,6 +232,11 @@ class FullCudaGraphWrapper:
                         valid_counts_by_microbatch,
                         b,
                         self._extract_dmi_valid_count(inputs),
+                    )
+                    self._record_valid_count(
+                        dataset_ids_by_microbatch,
+                        b,
+                        self._extract_dmi_dataset_id(inputs),
                     )
                     data_list.append(
                         self.static_loader(
@@ -234,6 +261,11 @@ class FullCudaGraphWrapper:
                             b,
                             self._extract_dmi_valid_count(inputs),
                         )
+                        self._record_valid_count(
+                            dataset_ids_by_microbatch,
+                            b,
+                            self._extract_dmi_dataset_id(inputs),
+                        )
                         data_list_i.append(
                             self.static_loader(
                                 self._strip_dmi_metadata(inputs),
@@ -244,7 +276,7 @@ class FullCudaGraphWrapper:
                     data_list.append(iter(data_list_i))
                 else:
                     data_list.append(None)
-        return data_list, valid_counts_by_microbatch
+        return data_list, valid_counts_by_microbatch, dataset_ids_by_microbatch
 
     def static_data_list(self, data_iterator, model, training, num_microbatches):
         """Rebuild data iterators over static buffers without re-reading the dataloader."""
@@ -299,7 +331,7 @@ class FullCudaGraphWrapper:
             self.next_iter(training_str)
             return FullCudaGraphWrapper.result[training_str]
 
-        data_list, valid_counts_by_microbatch = self.data_read(
+        data_list, valid_counts_by_microbatch, dataset_ids_by_microbatch = self.data_read(
             data_iterator, model, training, num_microbatches
         )
         kwargs['data_iterator'] = data_list
@@ -323,6 +355,7 @@ class FullCudaGraphWrapper:
                 warmup_enabled=True,
                 full_iteration=True,
                 valid_counts_by_microbatch=valid_counts_by_microbatch,
+                dataset_ids_by_microbatch=dataset_ids_by_microbatch,
             )
             try:
                 with torch.cuda.graph(
@@ -350,6 +383,7 @@ class FullCudaGraphWrapper:
             fallback_to_eager = dmi_prepare_full_iteration_replay(
                 dmi_plan,
                 valid_counts_by_microbatch,
+                dataset_ids_by_microbatch,
             ) if dmi_plan is not None else False
             if fallback_to_eager:
                 kwargs['data_iterator'] = self.static_data_list(

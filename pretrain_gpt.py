@@ -71,8 +71,10 @@ except Exception:
         del selection
         return True
 
-    def dmi_record_current_microbatch_metadata(valid_count, valid_count_cpu=None):
-        del valid_count, valid_count_cpu
+    def dmi_record_current_microbatch_metadata(
+        valid_count, valid_count_cpu=None, dataset_id_cpu=None
+    ):
+        del valid_count, valid_count_cpu, dataset_id_cpu
 
     def dmi_enter_current_scope():
         pass
@@ -185,8 +187,13 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     # the DMI schedule/context layer consumes it before model execution.
     dmi_valid_count = batch.pop('dmi_valid_count', None)
     dmi_valid_count_cpu = batch.pop('dmi_valid_count_cpu', None)
-    if _dmi_is_enabled(args) and _dmi_needs_valid_count(args):
-        dmi_record_current_microbatch_metadata(dmi_valid_count, dmi_valid_count_cpu)
+    dmi_dataset_id_cpu = batch.pop('dmi_dataset_id_cpu', None)
+    if _dmi_is_enabled(args):
+        dmi_record_current_microbatch_metadata(
+            dmi_valid_count,
+            dmi_valid_count_cpu,
+            dmi_dataset_id_cpu,
+        )
     if local_cp_size is not None:
         local_cp_size = int(local_cp_size.item())
 
@@ -479,6 +486,7 @@ if __name__ == "__main__":
 
     # Temporary for transition to core datasets
     train_valid_test_datasets_provider.is_distributed = True
+    train_valid_test_datasets_provider.dmi_standard_dataset_provider = True
 
     # Optionally enable inprocess restart on pretrain
     pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)

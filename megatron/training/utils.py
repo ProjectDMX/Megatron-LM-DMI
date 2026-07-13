@@ -659,6 +659,13 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             dmi_valid_count_cpu_raw = data.get("dmi_valid_count_cpu", dmi_valid_count_raw)
             batch['dmi_valid_count'] = dmi_valid_count_raw
             batch['dmi_valid_count_cpu'] = _cpu_dmi_valid_count(dmi_valid_count_cpu_raw)
+        if dmi_enabled:
+            dmi_dataset_id_raw = data.get("dataset_id", None)
+            batch["dmi_dataset_id_cpu"] = (
+                None
+                if dmi_dataset_id_raw is None
+                else _cpu_dmi_valid_count(dmi_dataset_id_raw)
+            )
 
         def _broadcast_cu_seqlens(cu_seqlens):
             if _tp_world_size_is_one():
@@ -833,6 +840,8 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         if dmi_metadata_enabled:
             batch['dmi_valid_count'] = dmi_valid_count
             batch['dmi_valid_count_cpu'] = None
+        if dmi_enabled:
+            batch['dmi_dataset_id_cpu'] = None
 
     return batch
 

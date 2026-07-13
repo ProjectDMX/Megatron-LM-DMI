@@ -1041,6 +1041,7 @@ def pretrain(
             args=args,
             model_config=config,
             printer=print_rank_0,
+            dataset_provider=train_valid_test_dataset_provider,
         )
         if args.perform_rl_step:
             raise NotImplementedError("DMI training phase tracking does not support RL/rollout paths yet")
@@ -1847,20 +1848,19 @@ def train_step(
     )
 
     dmi_begin_logical_iteration(int(iteration) + 1)
-    try:
-        return _train_step_impl(
-            forward_step_func,
-            data_iterator,
-            model,
-            optimizer,
-            opt_param_scheduler,
-            config,
-            forward_backward_func,
-            iteration=iteration,
-            dmi_handle=dmi_handle,
-        )
-    finally:
-        dmi_finish_logical_iteration()
+    result = _train_step_impl(
+        forward_step_func,
+        data_iterator,
+        model,
+        optimizer,
+        opt_param_scheduler,
+        config,
+        forward_backward_func,
+        iteration=iteration,
+        dmi_handle=dmi_handle,
+    )
+    dmi_finish_logical_iteration()
+    return result
 
 
 def _train_step_impl(
@@ -1879,11 +1879,20 @@ def _train_step_impl(
     timers = get_timers()
 
     rerun_state_machine = get_rerun_state_machine()
+    if dmi_handle is not None:
+        from integration.megatron_schedule_runtime import (
+            dmi_begin_attempt,
+            dmi_finish_attempt,
+        )
     save_dgrads_in_this_iteration = (args.save_dgrads_interval is not None and
                                      (iteration + 1) % args.save_dgrads_interval == 0)
     save_wgrads_in_this_iteration = (args.save_wgrads_interval is not None and
                                      (iteration + 1) % args.save_wgrads_interval == 0)
-    while rerun_state_machine.should_run_forward_backward(data_iterator):
+    run_current_attempt = rerun_state_machine.should_run_forward_backward(data_iterator)
+    attempt_id = 0
+    while run_current_attempt:
+        if dmi_handle is not None:
+            dmi_begin_attempt(attempt_id)
         # Set grad to zero.
         for model_chunk in model:
             model_chunk.zero_grad_buffer()
@@ -1942,6 +1951,11 @@ def _train_step_impl(
         for model_chunk in model:
             model_chunk.force_all_reduce = False
 
+        run_current_attempt = rerun_state_machine.should_run_forward_backward(data_iterator)
+        if run_current_attempt and dmi_handle is not None:
+            dmi_finish_attempt(0)
+            attempt_id += 1
+
     # Checkpoint main_grads.
     if save_wgrads_in_this_iteration:
         # Collect state_dict of wgrads (each param's .main_grad field).
@@ -1959,6 +1973,8 @@ def _train_step_impl(
 
     should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
     if should_exit:
+        if dmi_handle is not None:
+            dmi_finish_attempt(-1)
         return {}, True, should_checkpoint, should_exit, exit_code, None, None, 0
 
     # Empty unused memory.
@@ -1999,6 +2015,8 @@ def _train_step_impl(
         num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
     if dmi_handle is not None and update_successful:
         dmi_handle.emit_router_weights(model_state_iteration_id=int(iteration) + 1)
+    if dmi_handle is not None:
+        dmi_finish_attempt(1)
 
     # Vision momentum.
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
@@ -3636,16 +3654,30 @@ def evaluate_and_print_results(
         suffix = ""
         if args.multiple_validation_sets:
             suffix = f"-{index}"
-        total_loss_dict, collected_non_loss_data, timelimit = evaluate(
-            forward_step_func,
-            iterator,
-            model,
-            process_non_loss_data_func,
-            config,
-            verbose,
-            non_loss_data_func,
-            eval_iters=iterations,
-        )
+        dmi_dataset_override_active = False
+        if args.multiple_validation_sets and (
+            getattr(args, "dmi_enable", None)
+            or str(os.getenv("DMI_ENABLE", "")).strip().lower()
+            in ("1", "true", "yes", "on")
+        ):
+            from integration.megatron_schedule_runtime import dmi_set_dataset_id_override
+
+            dmi_set_dataset_id_override(index)
+            dmi_dataset_override_active = True
+        try:
+            total_loss_dict, collected_non_loss_data, timelimit = evaluate(
+                forward_step_func,
+                iterator,
+                model,
+                process_non_loss_data_func,
+                config,
+                verbose,
+                non_loss_data_func,
+                eval_iters=iterations,
+            )
+        finally:
+            if dmi_dataset_override_active:
+                dmi_set_dataset_id_override(None)
         # Timelimit hit during evaluation
         if timelimit:
             return
