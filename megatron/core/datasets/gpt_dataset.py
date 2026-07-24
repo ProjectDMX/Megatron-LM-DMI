@@ -79,6 +79,39 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     dmi_metadata_enabled: bool = False
     """Option to emit DMI-only metadata fields in dataset samples."""
 
+    dmi_packed_max_conversations_per_row: Optional[int] = None
+    """Fixed DMI logical-conversation capacity for one packed SFT row."""
+
+    dmi_micro_batch_size: int = 1
+    """Micro-batch size recorded in packed-bound failures."""
+
+    dmi_dynamic_mixture_control_url: Optional[str] = None
+    """HTTP endpoint for opt-in exact-window mixture decisions."""
+
+    dmi_dynamic_mixture_run_id: Optional[str] = None
+    """Run identity used by the dynamic mixture decision endpoint."""
+
+    dmi_dynamic_mixture_window_iters: Optional[int] = None
+    """Number of optimizer iterations in one immutable selection window."""
+
+    dmi_dynamic_mixture_total_iters: Optional[int] = None
+    """Total optimizer iterations covered by the dynamic selection run."""
+
+    dmi_dynamic_mixture_global_batch_size: Optional[int] = None
+    """Global physical-pack count consumed by each optimizer iteration."""
+
+    dmi_dynamic_mixture_request_timeout_s: float = 60.0
+    """One HTTP long-poll request timeout."""
+
+    dmi_dynamic_mixture_feedback_timeout_s: float = 30.0
+    """Maximum boundary wait for the exact next-window decision."""
+
+    dmi_dynamic_mixture_audit_dir: Optional[str] = None
+    """Optional directory for asynchronously written dynamic-selection audits."""
+
+    dmi_dynamic_mixture_num_workers: int = -1
+    """Configured DataLoader worker count, validated by the dynamic path."""
+
     def __post_init__(self) -> None:
         """Do asserts and set fields post init"""
         super().__post_init__()

@@ -212,7 +212,7 @@ class BlendedMegatronDatasetBuilder(object):
                             "Using client-specified weights requires client-specified size"
                         )
                     blended_datasets[i] = self.build_generic_dataset(
-                        BlendedDataset,
+                        self._top_level_dataset_class(i),
                         self.is_built_on_rank,
                         (
                             False
@@ -310,7 +310,7 @@ class BlendedMegatronDatasetBuilder(object):
                     else:
                         raise RuntimeError
                     blended_datasets[i] = self.build_generic_dataset(
-                        BlendedDataset,
+                        self._top_level_dataset_class(i),
                         self.is_built_on_rank,
                         (
                             False
@@ -327,6 +327,16 @@ class BlendedMegatronDatasetBuilder(object):
                     )
 
             return blended_datasets
+
+    def _top_level_dataset_class(self, split_index: int):
+        control_url = getattr(self.config, "dmi_dynamic_mixture_control_url", None)
+        if control_url is None:
+            return BlendedDataset
+        if split_index != Split.train.value:
+            return BlendedDataset
+        from integration.megatron_dynamic_mixture import DynamicBlendedDataset
+
+        return DynamicBlendedDataset
 
     def _build_megatron_datasets_parallel(
         self, prefixes: List[str], split: List[float], sizes_per_dataset: List[List[int]]

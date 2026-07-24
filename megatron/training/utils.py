@@ -564,8 +564,11 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
     dmi_hook_selection = getattr(args, "dmi_hook_selection", None)
     if dmi_hook_selection is None:
         dmi_hook_selection = os.getenv("DMI_HOOK_SELECTION", "router-summary")
-    parse_hook_selection(dmi_hook_selection)
-    dmi_metadata_enabled = dmi_enabled and hook_selection_requires_valid_count(dmi_hook_selection)
+    selected_dmi_hooks = parse_hook_selection(dmi_hook_selection)
+    dmi_metadata_enabled = dmi_enabled and (
+        hook_selection_requires_valid_count(selected_dmi_hooks)
+        or (bool(getattr(args, "sft", False)) and "loss-summary" in selected_dmi_hooks)
+    )
 
     def _broadcast(item):
         if item is not None:
@@ -624,10 +627,90 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         _broadcast(valid_count)
         return valid_count
 
+    def _compile_packed_dmi_metadata(data):
+        row_metadata = data.get("dmi_segment_metadata")
+        row_counts = data.get("dmi_valid_count")
+        if row_metadata is None or row_counts is None:
+            raise RuntimeError(
+                "DMI packed SFT batch is missing segment metadata or valid counts"
+            )
+        if row_metadata.dim() != 2 or row_counts.dim() != 2:
+            raise RuntimeError(
+                "DMI packed SFT metadata must be collated as [M, 2*C] and [M, C]"
+            )
+        micro_batch = int(row_metadata.shape[0])
+        row_capacity = int(row_counts.shape[1])
+        if int(row_metadata.shape[1]) != 2 * row_capacity:
+            raise RuntimeError("DMI packed SFT start/end metadata shape is inconsistent")
+        if micro_batch != int(data["tokens"].shape[0]):
+            raise RuntimeError("DMI packed SFT metadata M dimension does not match tokens")
+
+        source_dataset_ids = data.get("dataset_id")
+        if source_dataset_ids is None:
+            source_dataset_ids = torch.zeros(micro_batch, dtype=torch.int64)
+        source_dataset_ids = torch.as_tensor(
+            source_dataset_ids, dtype=torch.int64, device="cpu"
+        ).view(-1)
+        if source_dataset_ids.numel() != micro_batch:
+            raise RuntimeError("DMI packed SFT dataset_id must contain one ID per physical row")
+
+        sequence_length = int(data["tokens"].shape[1])
+        starts = row_metadata[:, :row_capacity].to(dtype=torch.int64, device="cpu")
+        ends = row_metadata[:, row_capacity:].to(dtype=torch.int64, device="cpu")
+        counts = row_counts.to(dtype=torch.int64, device="cpu")
+        active_starts = []
+        active_ends = []
+        active_counts = []
+        active_dataset_ids = []
+        for row_index in range(micro_batch):
+            for segment_index in range(row_capacity):
+                count = int(counts[row_index, segment_index].item())
+                start = int(starts[row_index, segment_index].item())
+                end = int(ends[row_index, segment_index].item())
+                if count <= 0:
+                    continue
+                if end - start != count or start < 0 or end > sequence_length:
+                    raise RuntimeError(
+                        "DMI packed SFT row range is inconsistent: "
+                        f"row={row_index} segment={segment_index} "
+                        f"range=[{start},{end}) count={count} seq={sequence_length}"
+                    )
+                offset = row_index * sequence_length
+                active_starts.append(offset + start)
+                active_ends.append(offset + end)
+                active_counts.append(count)
+                active_dataset_ids.append(int(source_dataset_ids[row_index].item()))
+
+        batch_capacity = micro_batch * row_capacity
+        if len(active_counts) > batch_capacity:
+            raise RuntimeError(
+                "DMI packed SFT active conversation count exceeds batch capacity"
+            )
+        final_end = active_ends[-1] if active_ends else 0
+        inactive = batch_capacity - len(active_counts)
+        active_starts.extend([final_end] * inactive)
+        active_ends.extend([final_end] * inactive)
+        active_counts.extend([0] * inactive)
+        active_dataset_ids.extend([0] * inactive)
+        return (
+            torch.tensor(active_starts + active_ends, dtype=torch.int64),
+            torch.tensor(active_counts, dtype=torch.int64),
+            torch.tensor(active_dataset_ids, dtype=torch.int64),
+        )
+
     if mpu.get_tensor_model_parallel_rank() == 0:
 
         assert data_iterator is not None
         data = next(data_iterator)
+        packed_segment_metadata_cpu = None
+        packed_valid_count_cpu = None
+        packed_dataset_id_cpu = None
+        if args.sft and dmi_metadata_enabled:
+            (
+                packed_segment_metadata_cpu,
+                packed_valid_count_cpu,
+                packed_dataset_id_cpu,
+            ) = _compile_packed_dmi_metadata(data)
         batch = {
             'tokens': data["tokens"].cuda(non_blocking=True),
             'labels': data["labels"].cuda(non_blocking=True),
@@ -655,12 +738,26 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             ),
         }
         if dmi_metadata_enabled:
-            dmi_valid_count_raw = data.get("dmi_valid_count", None)
+            dmi_valid_count_raw = (
+                packed_valid_count_cpu
+                if args.sft
+                else data.get("dmi_valid_count", None)
+            )
             dmi_valid_count_cpu_raw = data.get("dmi_valid_count_cpu", dmi_valid_count_raw)
             batch['dmi_valid_count'] = dmi_valid_count_raw
             batch['dmi_valid_count_cpu'] = _cpu_dmi_valid_count(dmi_valid_count_cpu_raw)
+            if args.sft:
+                batch["dmi_segment_metadata_cpu"] = packed_segment_metadata_cpu
+                batch["dmi_segment_metadata"] = packed_segment_metadata_cpu.to(
+                    device=torch.cuda.current_device(),
+                    non_blocking=True,
+                )
         if dmi_enabled:
-            dmi_dataset_id_raw = data.get("dataset_id", None)
+            dmi_dataset_id_raw = (
+                packed_dataset_id_cpu
+                if args.sft and packed_dataset_id_cpu is not None
+                else data.get("dataset_id", None)
+            )
             batch["dmi_dataset_id_cpu"] = (
                 None
                 if dmi_dataset_id_raw is None
@@ -698,7 +795,8 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(batch['max_seqlen'])
             _broadcast(batch['local_cp_size'])
             if dmi_metadata_enabled:
-                batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
+                if not args.sft:
+                    batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
         elif mpu.is_pipeline_first_stage():
             _broadcast(batch['tokens'])
@@ -707,7 +805,8 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast_cu_seqlens(batch['cu_seqlens'])
             _broadcast(batch['max_seqlen'])
             if dmi_metadata_enabled:
-                batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
+                if not args.sft:
+                    batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
         elif mpu.is_pipeline_last_stage():
             # Multi-Token Prediction (MTP) layers need tokens and position_ids to calculate embedding.
@@ -717,7 +816,8 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(batch['loss_mask'])
             _broadcast(batch['attention_mask'])
             if dmi_metadata_enabled:
-                batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
+                if not args.sft:
+                    batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
     else:
         if args.hybrid_context_parallel:
@@ -772,6 +872,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             device=torch.cuda.current_device(),
         ) if args.hybrid_context_parallel else None
         dmi_valid_count = None
+        dmi_segment_metadata = None
 
         def _broadcast_cu_seqlens():
             dev = torch.cuda.current_device()
@@ -798,7 +899,8 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(max_seqlen)
             _broadcast(local_cp_size)
             if dmi_metadata_enabled:
-                dmi_valid_count = _broadcast_dmi_valid_count()
+                if not args.sft:
+                    dmi_valid_count = _broadcast_dmi_valid_count()
 
         elif mpu.is_pipeline_first_stage():
             labels = None
@@ -810,7 +912,8 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             cu_seqlens = _broadcast_cu_seqlens()
             _broadcast(max_seqlen)
             if dmi_metadata_enabled:
-                dmi_valid_count = _broadcast_dmi_valid_count()
+                if not args.sft:
+                    dmi_valid_count = _broadcast_dmi_valid_count()
 
         elif mpu.is_pipeline_last_stage():
             # Multi-Token Prediction (MTP) layers need tokens and position_ids to calculate embedding.
@@ -825,7 +928,8 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(loss_mask)
             _broadcast(attention_mask)
             if dmi_metadata_enabled:
-                dmi_valid_count = _broadcast_dmi_valid_count()
+                if not args.sft:
+                    dmi_valid_count = _broadcast_dmi_valid_count()
 
         batch = {
             'tokens': tokens,
@@ -840,6 +944,9 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         if dmi_metadata_enabled:
             batch['dmi_valid_count'] = dmi_valid_count
             batch['dmi_valid_count_cpu'] = None
+            if args.sft:
+                batch["dmi_segment_metadata"] = dmi_segment_metadata
+                batch["dmi_segment_metadata_cpu"] = None
         if dmi_enabled:
             batch['dmi_dataset_id_cpu'] = None
 

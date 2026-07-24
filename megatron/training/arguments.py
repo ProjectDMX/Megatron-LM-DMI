@@ -3328,6 +3328,54 @@ def _add_dmi_args(parser):
     group = parser.add_argument_group(title='dmi')
 
     group.add_argument(
+        '--dmi-packed-max-conversations-per-row',
+        type=int,
+        default=None,
+        help='Scanned fixed DMI conversation capacity for each packed SFT row.',
+    )
+    group.add_argument(
+        '--dmi-packed-conversation-scan-report',
+        type=str,
+        default=None,
+        help='Machine-readable full-row scan report that supplied the packed capacity.',
+    )
+    group.add_argument(
+        '--dmi-dynamic-mixture-control-url',
+        type=str,
+        default=None,
+        help='Enable dynamic SFT blending with exact-window decisions from this HTTP endpoint.',
+    )
+    group.add_argument(
+        '--dmi-dynamic-mixture-run-id',
+        type=str,
+        default=None,
+        help='Run identity used by the dynamic-mixture decision endpoint.',
+    )
+    group.add_argument(
+        '--dmi-dynamic-mixture-window-iters',
+        type=int,
+        default=None,
+        help='Optimizer iterations in one immutable dynamic-mixture window.',
+    )
+    group.add_argument(
+        '--dmi-dynamic-mixture-request-timeout-s',
+        type=float,
+        default=60.0,
+        help='Timeout for one dynamic-mixture HTTP long-poll request.',
+    )
+    group.add_argument(
+        '--dmi-dynamic-mixture-feedback-timeout-s',
+        type=float,
+        default=30.0,
+        help='Maximum training-boundary wait for the exact next mixture decision.',
+    )
+    group.add_argument(
+        '--dmi-dynamic-mixture-audit-dir',
+        type=str,
+        default=None,
+        help='Optional directory for asynchronously written rank-local selection audits.',
+    )
+    group.add_argument(
         '--dmi-enable',
         action='store_true',
         default=None,

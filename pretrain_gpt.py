@@ -72,9 +72,19 @@ except Exception:
         return True
 
     def dmi_record_current_microbatch_metadata(
-        valid_count, valid_count_cpu=None, dataset_id_cpu=None
+        valid_count,
+        valid_count_cpu=None,
+        dataset_id_cpu=None,
+        segment_metadata=None,
+        segment_metadata_cpu=None,
     ):
-        del valid_count, valid_count_cpu, dataset_id_cpu
+        del (
+            valid_count,
+            valid_count_cpu,
+            dataset_id_cpu,
+            segment_metadata,
+            segment_metadata_cpu,
+        )
 
     def dmi_enter_current_scope():
         pass
@@ -112,7 +122,10 @@ def _dmi_needs_valid_count(args) -> bool:
     selection = getattr(args, "dmi_hook_selection", None)
     if selection is None:
         selection = os.getenv("DMI_HOOK_SELECTION", "router-summary")
-    return hook_selection_requires_valid_count(selection)
+    selected = parse_hook_selection(selection)
+    return hook_selection_requires_valid_count(selected) or (
+        bool(getattr(args, "sft", False)) and "loss-summary" in selected
+    )
 
 
 def get_batch(data_iterator, vp_stage: Optional[int] = None):
@@ -188,11 +201,15 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     dmi_valid_count = batch.pop('dmi_valid_count', None)
     dmi_valid_count_cpu = batch.pop('dmi_valid_count_cpu', None)
     dmi_dataset_id_cpu = batch.pop('dmi_dataset_id_cpu', None)
+    dmi_segment_metadata = batch.pop('dmi_segment_metadata', None)
+    dmi_segment_metadata_cpu = batch.pop('dmi_segment_metadata_cpu', None)
     if _dmi_is_enabled(args):
         dmi_record_current_microbatch_metadata(
             dmi_valid_count,
             dmi_valid_count_cpu,
             dmi_dataset_id_cpu,
+            dmi_segment_metadata,
+            dmi_segment_metadata_cpu,
         )
     if local_cp_size is not None:
         local_cp_size = int(local_cp_size.item())
@@ -261,7 +278,15 @@ def loss_func(
         dmi_loss_hook = get_attr_wrapped_model(
             model, "dmi_lm_per_sample_loss", allow_none=False
         )
-        dmi_loss_hook(output_tensor, loss_mask)
+        if bool(getattr(args, "sft", False)):
+            dmi_loss_hook(
+                output_tensor,
+                loss_mask,
+                dmi_loss_hook.sample_start_ptr_fwd,
+                dmi_loss_hook.sample_end_ptr_fwd,
+            )
+        else:
+            dmi_loss_hook(output_tensor, loss_mask)
 
     if has_nvidia_modelopt and getattr(args, 'modelopt_enabled', False):  # [ModelOpt]
         loss, num_tokens, report = loss_func_modelopt(loss_mask, output_tensor, model=model)
@@ -401,7 +426,74 @@ def core_gpt_dataset_config_from_args(args):
         "sequence_parallel_size": args.tensor_model_parallel_size*args.sequence_parallel,
         "hybrid_context_parallel": args.hybrid_context_parallel,
         "dmi_metadata_enabled": _dmi_is_enabled(args) and _dmi_needs_valid_count(args),
+        "dmi_packed_max_conversations_per_row": (
+            getattr(args, "dmi_packed_max_conversations_per_row", None)
+        ),
+        "dmi_micro_batch_size": int(args.micro_batch_size),
+        "dmi_dynamic_mixture_control_url": getattr(
+            args, "dmi_dynamic_mixture_control_url", None
+        ),
+        "dmi_dynamic_mixture_run_id": getattr(
+            args, "dmi_dynamic_mixture_run_id", None
+        ),
+        "dmi_dynamic_mixture_window_iters": getattr(
+            args, "dmi_dynamic_mixture_window_iters", None
+        ),
+        "dmi_dynamic_mixture_total_iters": int(args.train_iters),
+        "dmi_dynamic_mixture_global_batch_size": int(args.global_batch_size),
+        "dmi_dynamic_mixture_request_timeout_s": float(
+            getattr(args, "dmi_dynamic_mixture_request_timeout_s", 60.0)
+        ),
+        "dmi_dynamic_mixture_feedback_timeout_s": float(
+            getattr(args, "dmi_dynamic_mixture_feedback_timeout_s", 30.0)
+        ),
+        "dmi_dynamic_mixture_audit_dir": getattr(
+            args, "dmi_dynamic_mixture_audit_dir", None
+        ),
+        "dmi_dynamic_mixture_num_workers": int(args.num_workers),
     }
+
+    if data_args["dmi_dynamic_mixture_control_url"] is not None:
+        if not args.sft:
+            raise RuntimeError("DMI dynamic mixture requires --sft")
+        if int(args.num_workers) != 0:
+            raise RuntimeError("DMI dynamic mixture requires --num-workers 0")
+        if int(args.data_parallel_size) != 1:
+            raise RuntimeError("the first DMI dynamic mixture path requires DP=1")
+        required_dynamic = {
+            "--dmi-dynamic-mixture-run-id": data_args["dmi_dynamic_mixture_run_id"],
+            "--dmi-dynamic-mixture-window-iters": data_args[
+                "dmi_dynamic_mixture_window_iters"
+            ],
+        }
+        missing_dynamic = [
+            name for name, value in required_dynamic.items() if value in (None, "")
+        ]
+        if missing_dynamic:
+            raise RuntimeError(
+                "DMI dynamic mixture is missing required arguments: "
+                + ", ".join(missing_dynamic)
+            )
+
+    if args.sft and data_args["dmi_metadata_enabled"]:
+        configured_bound = data_args["dmi_packed_max_conversations_per_row"]
+        scan_report_path = getattr(args, "dmi_packed_conversation_scan_report", None)
+        if configured_bound is None or int(configured_bound) <= 0:
+            raise RuntimeError(
+                "DMI packed SFT requires --dmi-packed-max-conversations-per-row"
+            )
+        if not scan_report_path:
+            raise RuntimeError(
+                "DMI packed SFT requires --dmi-packed-conversation-scan-report"
+            )
+        with open(scan_report_path, "r", encoding="utf-8") as handle:
+            scan_report = json.load(handle)
+        measured_bound = int(scan_report["global_c_row_max"])
+        if measured_bound != int(configured_bound):
+            raise RuntimeError(
+                "DMI packed SFT scan/configuration mismatch: "
+                f"scan={measured_bound} configured={int(configured_bound)}"
+            )
 
     # add FIM args to the config
     if args.fim_data:

@@ -93,8 +93,23 @@ class SFTDataset(MegatronDataset):
         tokenizer = self.config.tokenizer
         pack_length = self.config.sequence_length
 
-        merged_conversations = self.dataset[int(self.indices[idx % len(self.indices)])]
+        source_row_index = int(self.indices[idx % len(self.indices)])
+        merged_conversations = self.dataset[source_row_index]
         split_conversations = self._split_conversations(merged_conversations)
+        dmi_capacity = self.config.dmi_packed_max_conversations_per_row
+        if self.config.dmi_metadata_enabled:
+            if dmi_capacity is None or int(dmi_capacity) <= 0:
+                raise RuntimeError(
+                    "DMI packed SFT requires a positive "
+                    "dmi_packed_max_conversations_per_row"
+                )
+            if len(split_conversations) > int(dmi_capacity):
+                raise RuntimeError(
+                    "DMI packed conversation bound exceeded: "
+                    f"observed={len(split_conversations)} configured={int(dmi_capacity)} "
+                    f"row_index={source_row_index} source={self.dataset_path!r} "
+                    f"micro_batch_size={int(self.config.dmi_micro_batch_size)}"
+                )
 
         def extend_with_padding(tokens, targets, positions, pad_len):
             tokens.extend([pad] * pad_len)
@@ -105,6 +120,7 @@ class SFTDataset(MegatronDataset):
         pack_targets = []
         pack_positions = []
         cu_seqlens = [0]
+        dmi_valid_ranges = []
         eod = tokenizer.eod
         pad = tokenizer.pad
         # TODO(duncan): Track number of convs dropped and/or truncated and amount of end-padding
@@ -118,8 +134,12 @@ class SFTDataset(MegatronDataset):
             targets_list = targets.tolist()
 
 
+            dmi_start = len(pack_tokens)
             pack_tokens.extend(tokens_list)
             pack_targets.extend(targets_list)
+            dmi_end = min(len(pack_tokens), pack_length)
+            if dmi_end > dmi_start:
+                dmi_valid_ranges.append((dmi_start, dmi_end))
 
             assert not self.config.reset_position_ids
             pack_positions.extend(range(len(tokens_list)))
@@ -170,9 +190,10 @@ class SFTDataset(MegatronDataset):
         loss_mask[labels == pad] = 0.0  # Mask paddings
         loss_mask[labels == IGNORE_INDEX] = 0.0  # mask prompts
 
-        # TODO(duncan): Optionally create an attention mask
-        assert not self.config.create_attention_mask and not self.config.reset_attention_mask
-        # attention_mask = None
+        assert not self.config.reset_attention_mask
+        attention_mask = torch.zeros(pack_length, dtype=torch.int64)
+        for start, end in dmi_valid_ranges:
+            attention_mask[start:end] = 1
 
         assert len(cu_seqlens) >= 2
         cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32)
@@ -181,12 +202,34 @@ class SFTDataset(MegatronDataset):
         adjacent_diffs = cu_seqlens[1:] - cu_seqlens[:-1]
         max_seqlen = adjacent_diffs.max()  # max_seqlen is a 0-D tensor
 
-        return {
+        result = {
             'tokens': input_ids,
             'labels': labels,
-            # 'attention_mask': attention_mask,  # PyTorch collate cannot handle NoneType
+            'attention_mask': attention_mask,
             'loss_mask': loss_mask,
             'position_ids': position_ids,
             'cu_seqlens': cu_seqlens,
             'max_seqlen': max_seqlen,
         }
+        if self.config.dmi_metadata_enabled:
+            capacity = int(dmi_capacity)
+            if len(dmi_valid_ranges) > capacity:
+                raise RuntimeError(
+                    "DMI represented conversation count exceeds configured capacity: "
+                    f"represented={len(dmi_valid_ranges)} configured={capacity} "
+                    f"row_index={source_row_index} source={self.dataset_path!r} "
+                    f"micro_batch_size={int(self.config.dmi_micro_batch_size)}"
+                )
+            final_end = dmi_valid_ranges[-1][1] if dmi_valid_ranges else 0
+            starts = [item[0] for item in dmi_valid_ranges]
+            ends = [item[1] for item in dmi_valid_ranges]
+            starts.extend([final_end] * (capacity - len(starts)))
+            ends.extend([final_end] * (capacity - len(ends)))
+            result['dmi_segment_metadata'] = torch.tensor(
+                starts + ends, dtype=torch.int64
+            )
+            result['dmi_valid_count'] = torch.tensor(
+                [end - start for start, end in zip(starts, ends)],
+                dtype=torch.int64,
+            )
+        return result
