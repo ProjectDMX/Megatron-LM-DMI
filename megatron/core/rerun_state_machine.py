@@ -295,6 +295,13 @@ class RerunStateMachine:
         self.validation_counts = defaultdict(int)
 
         data_iterators: list[RerunDataIterator] = self._sanitize_data_iterators(data_iterator)
+        if self.data_iterator_checkpoints is not None:
+            assert len(self.data_iterator_checkpoints) == len(
+                data_iterators
+            ), "data iterator has different length than checkpointed data iterator"
+            for i, d in enumerate(data_iterators):
+                d.load_state_dict(self.data_iterator_checkpoints[i])
+            self.data_iterator_checkpoints = None
 
         # Are we about to start the initial run?
         if self.state == RerunState.NOT_RUNNING_YET:
@@ -302,13 +309,6 @@ class RerunStateMachine:
                 self.state = RerunState.INITIAL_RUN
                 self.current_iteration += 1  # Increment self.current_iteration for reporting.
                 return True
-            if self.data_iterator_checkpoints is not None:
-                assert len(self.data_iterator_checkpoints) == len(
-                    data_iterators
-                ), "data iterator has different length than checkpointed data iterator"
-                for i, d in enumerate(data_iterators):
-                    d.load_state_dict(self.data_iterator_checkpoints[i])
-                self.data_iterator_checkpoints = None
             self._save_state()
             if data_iterators:
                 for d in data_iterators:

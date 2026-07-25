@@ -1017,6 +1017,11 @@ def pretrain(
     else:
         checkpointing_context = {}
 
+    if getattr(args, "dmi_exact_resume", False):
+        from integration.megatron_exact_resume import configure_dmi_exact_execution
+
+        configure_dmi_exact_execution(args)
+
     # Model, optimizer, and learning rate.
     timers('model-and-optimizer-setup', log_level=0).start(barrier=True)
     model, optimizer, opt_param_scheduler = setup_model_and_optimizer(
@@ -1043,6 +1048,10 @@ def pretrain(
             printer=print_rank_0,
             dataset_provider=train_valid_test_dataset_provider,
         )
+        if getattr(args, "dmi_exact_resume", False):
+            from integration.megatron_exact_resume import setup_dmi_exact_resume
+
+            setup_dmi_exact_resume(args, dmi_handle, printer=print_rank_0)
         if args.perform_rl_step:
             raise NotImplementedError("DMI training phase tracking does not support RL/rollout paths yet")
 
@@ -1160,6 +1169,10 @@ def pretrain(
     timers('train/valid/test-data-iterators-setup').stop()
     print_datetime('after dataloaders are built')
     app_metrics['app_build_dataiters_finish_time'] = one_logger_utils.get_timestamp_in_ms()
+    if getattr(args, "dmi_exact_resume", False):
+        from integration.megatron_exact_resume import validate_dmi_exact_dataset_restore
+
+        validate_dmi_exact_dataset_restore(args)
 
     # Track if training is enabled. Can only be done once args.do_train is assigned after dataloader is built.
     one_logger_utils.track_config_flags(
@@ -1312,6 +1325,10 @@ def pretrain(
 
     if dmi_handle is not None:
         dmi_handle.close()
+        if getattr(args, "dmi_exact_resume", False):
+            from integration.megatron_exact_resume import clear_active_dmi_exact_resume
+
+            clear_active_dmi_exact_resume()
 
     ft_integration.shutdown()
     one_logger_utils.finish()
@@ -3026,6 +3043,16 @@ def train(
             optimizers=[optimizer],
         )
 
+    # Resume reconstructed the DataLoader iterator after loading checkpoint RNG,
+    # repeating a base-seed draw that occurred before the checkpoint snapshot in
+    # the uninterrupted run. Exact resume requires num_workers=0, so that cached
+    # seed is unused. With workers, rewinding its source RNG while retaining the
+    # cached seed for later worker initialization would be inconsistent.
+    if getattr(args, "dmi_exact_resume", False):
+        from integration.megatron_exact_resume import restore_dmi_exact_loaded_rng_state
+
+        restore_dmi_exact_loaded_rng_state(args)
+
     # Run training iterations till done.
     buffered_rollouts = None
     while iteration < args.train_iters:
@@ -3791,6 +3818,9 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
         consumed_train_samples_in_current_phase = (args.iteration - last_transition) * args.global_batch_size
     else:
         consumed_train_samples_in_current_phase = args.consumed_train_samples
+    consumed_train_samples_in_current_phase += int(
+        getattr(args, "_dmi_rerun_sampler_extra_consumed_samples", 0)
+    )
 
     # Rely on distributed-aware core datasets, temporary
     is_distributed = getattr(build_train_valid_test_datasets_provider, "is_distributed", False)

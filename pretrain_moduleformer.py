@@ -49,6 +49,14 @@ def add_moduleformer_args(parser):
         action="store_true",
         help="Train router parameters. The paper-aligned default freezes them.",
     )
+    group.add_argument(
+        "--moduleformer-force-deterministic-expert-combine",
+        action="store_true",
+        help=(
+            "Use fixed-order expert combination for determinism tests. "
+            "The default preserves the released ModuleFormer index_add path."
+        ),
+    )
     return parser
 
 
@@ -118,6 +126,9 @@ def moduleformer_model_provider(
         raise NotImplementedError("ModuleFormer does not support virtual pipeline stages")
     args = get_args()
     hf_config = ModuleFormerConfig.from_pretrained(args.moduleformer_config)
+    hf_config.force_deterministic_expert_combine = bool(
+        args.moduleformer_force_deterministic_expert_combine
+    )
     _validate_model_contract(args, hf_config)
     transformer_config = (
         core_transformer_config_from_args(args) if config is None else config

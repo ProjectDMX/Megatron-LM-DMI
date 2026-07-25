@@ -879,7 +879,24 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             elif sharding_type == 'fully_reshardable':
                 self.load_parameter_state_from_fully_reshardable(param_state)
             elif sharding_type == 'dp_reshardable':
-                self.load_parameter_state_from_dp_reshardable(param_state)
+                if (
+                    self.config.optimizer_cpu_offload
+                    and self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8
+                    and isinstance(self.optimizer, HybridDeviceOptimizer)
+                ):
+                    # Preserve the common step restored from param_groups; this
+                    # parameter state contains only a nonpersistent step placeholder.
+                    common_steps = {
+                        param: state["step"].detach().clone()
+                        for param, state in self.optimizer.state.items()
+                        if "step" in state
+                    }
+                    self.load_parameter_state_from_dp_reshardable(param_state)
+                    for param, step in common_steps.items():
+                        self.optimizer.state[param]["step"] = step
+                    self.optimizer._sync_hdo_state_to_sub_optimizers()
+                else:
+                    self.load_parameter_state_from_dp_reshardable(param_state)
             elif sharding_type == 'fully_sharded_model_space':
                 self.load_parameter_state_from_fs_model_space(param_state)
             else:

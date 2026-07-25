@@ -451,6 +451,9 @@ def core_gpt_dataset_config_from_args(args):
             args, "dmi_dynamic_mixture_audit_dir", None
         ),
         "dmi_dynamic_mixture_num_workers": int(args.num_workers),
+        "dmi_dynamic_mixture_resume_state": getattr(
+            args, "_dmi_dynamic_dataset_resume_state", None
+        ),
     }
 
     if data_args["dmi_dynamic_mixture_control_url"] is not None:

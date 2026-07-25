@@ -3328,6 +3328,35 @@ def _add_dmi_args(parser):
     group = parser.add_argument_group(title='dmi')
 
     group.add_argument(
+        '--dmi-exact-resume',
+        action='store_true',
+        help='Commit DMI dataset/controller/capture state with synchronous Megatron checkpoints.',
+    )
+    group.add_argument(
+        '--dmi-exact-checkpoint-timeout-s',
+        type=float,
+        default=600.0,
+        help='Timeout for DMI durable flush and controller checkpoint preparation.',
+    )
+    group.add_argument(
+        '--dmi-exact-salvage-root',
+        type=str,
+        default=None,
+        help='Separate root for a marked native checkpoint after exact preparation fails.',
+    )
+    group.add_argument(
+        '--dmi-exact-processed-database',
+        type=str,
+        default=None,
+        help='Optional processed-data database recorded in exact-resume lineage.',
+    )
+    group.add_argument(
+        '--dmi-exact-control-database',
+        type=str,
+        default=None,
+        help='Optional controller-data database recorded in exact-resume lineage.',
+    )
+    group.add_argument(
         '--dmi-packed-max-conversations-per-row',
         type=int,
         default=None,

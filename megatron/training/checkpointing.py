@@ -70,6 +70,9 @@ except Exception:
     has_nvidia_modelopt = False
 
 
+_DMI_STATE_UNSET = object()
+
+
 _CHECKPOINT_VERSION = None
 _LOADED_ITERATION = None
 
@@ -483,7 +486,8 @@ def save_grads(save_dir, state_dict, iteration, grad_label):
 
 def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floating_point_operations_so_far,
                     checkpointing_context=None, pipeline_rank=None, expert_rank=None, tensor_rank=None, pipeline_parallel=None, expert_parallel=None, non_persistent_ckpt=False,
-                    train_data_iterator=None, preprocess_common_state_dict_fn = None, release=False, tp_group: Optional[torch.distributed.ProcessGroup] = None, pp_group: Optional[torch.distributed.ProcessGroup] = None, dp_cp_group: Optional[torch.distributed.ProcessGroup] = None):
+                    train_data_iterator=None, preprocess_common_state_dict_fn = None, release=False, tp_group: Optional[torch.distributed.ProcessGroup] = None, pp_group: Optional[torch.distributed.ProcessGroup] = None, dp_cp_group: Optional[torch.distributed.ProcessGroup] = None,
+                    dmi_skip_exact_prepare=False, dmi_checkpoint_metadata=None):
     """Save a model, optimizer and optionally dataloader checkpoint.
 
     Checkpointing context is used to persist some checkpointing state
@@ -503,6 +507,78 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
     """
     start_ckpt = time()
     args = get_args()
+    dmi_resume_state = None
+    exact_enabled = bool(getattr(args, "dmi_exact_resume", False))
+    if exact_enabled and not dmi_skip_exact_prepare:
+        try:
+            from integration.megatron_exact_resume import prepare_dmi_exact_checkpoint
+
+            dmi_resume_state = prepare_dmi_exact_checkpoint(args, int(iteration))
+            dmi_checkpoint_metadata = {
+                "checkpoint_kind": "exact_training",
+                "dmi_exact_resume": True,
+            }
+        except BaseException as exact_error:
+            from integration.megatron_exact_resume import build_dmi_salvage_metadata
+
+            salvage_metadata = build_dmi_salvage_metadata(
+                args,
+                checkpoint_iteration=int(iteration),
+                failure=exact_error,
+            )
+            original_save = args.save
+            original_async_save = args.async_save
+            salvage_base = getattr(args, "dmi_exact_salvage_root", None)
+            if salvage_base is None:
+                salvage_base = f"{original_save}_dmi_salvage"
+            salvage_root = os.path.join(
+                str(salvage_base),
+                f"failed_exact_iter_{int(iteration):07d}",
+            )
+            if os.path.abspath(salvage_root) == os.path.abspath(str(original_save)):
+                raise RuntimeError(
+                    "DMI model-salvage root must differ from the exact checkpoint root"
+                ) from exact_error
+            salvage_error = None
+            try:
+                args.save = salvage_root
+                args.async_save = False
+                save_checkpoint(
+                    iteration,
+                    model,
+                    optimizer,
+                    opt_param_scheduler,
+                    num_floating_point_operations_so_far,
+                    checkpointing_context=checkpointing_context,
+                    pipeline_rank=pipeline_rank,
+                    expert_rank=expert_rank,
+                    tensor_rank=tensor_rank,
+                    pipeline_parallel=pipeline_parallel,
+                    expert_parallel=expert_parallel,
+                    non_persistent_ckpt=False,
+                    train_data_iterator=train_data_iterator,
+                    preprocess_common_state_dict_fn=preprocess_common_state_dict_fn,
+                    release=False,
+                    tp_group=tp_group,
+                    pp_group=pp_group,
+                    dp_cp_group=dp_cp_group,
+                    dmi_skip_exact_prepare=True,
+                    dmi_checkpoint_metadata=salvage_metadata,
+                )
+            except BaseException as exc:
+                salvage_error = exc
+            finally:
+                args.save = original_save
+                args.async_save = original_async_save
+            if salvage_error is not None:
+                raise RuntimeError(
+                    "DMI exact checkpoint preparation failed and model salvage "
+                    f"also failed: exact={exact_error}; salvage={salvage_error}"
+                ) from exact_error
+            raise RuntimeError(
+                "DMI exact checkpoint preparation failed; a non-exact model "
+                f"salvage checkpoint was saved to {salvage_root}: {exact_error}"
+            ) from exact_error
 
     if args.async_save and not is_empty_async_queue():
         print_rank_0('WARNING: Starting a checkpoint save before previous has finished. Consider increasing the checkpoint interval.')
@@ -613,6 +689,8 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
             optim_sd_kwargs=dict(metadata=sharded_sd_metadata),
             model_sd_kwargs=dict(metadata=sharded_sd_metadata),
             rerun_state=rerun_state,
+            dmi_resume_state=dmi_resume_state,
+            dmi_checkpoint_metadata=dmi_checkpoint_metadata,
         )
 
         state_dict['num_floating_point_operations_so_far'] = num_floating_point_operations_so_far
@@ -843,6 +921,17 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
     end_misc = time()
     logger.debug(f"rank: {rank}, takes {end_misc - start_misc} to finalize ckpt save ")
 
+    if exact_enabled and not dmi_skip_exact_prepare:
+        from integration.megatron_exact_resume import (
+            mark_dmi_exact_checkpoint_committed,
+        )
+
+        mark_dmi_exact_checkpoint_committed(
+            args,
+            checkpoint_iteration=int(iteration),
+            save_path=str(save_dir),
+        )
+
     ft_integration.on_checkpointing_end(is_async_finalization=False)
 
 @_disable_gc()
@@ -963,6 +1052,8 @@ def generate_state_dict(
     optim_sd_kwargs=None,
     model_sd_kwargs=None,
     rerun_state=None,
+    dmi_resume_state=_DMI_STATE_UNSET,
+    dmi_checkpoint_metadata=None,
 ):
     """Generate a state dict from given model, optimizer, scheduler, rng state and others. """
 
@@ -1023,6 +1114,13 @@ def generate_state_dict(
     # Rerun state
     if rerun_state:
         state_dict['rerun_state_machine'] = rerun_state
+
+    if dmi_resume_state is _DMI_STATE_UNSET:
+        dmi_resume_state = getattr(args, "_dmi_loaded_resume_state", None)
+    if dmi_resume_state is not None:
+        state_dict["dmi_resume_state"] = dmi_resume_state
+    if dmi_checkpoint_metadata is not None:
+        state_dict.update(dmi_checkpoint_metadata)
 
     # RNG states.
     if not args.no_save_rng and rng_state:
@@ -1585,6 +1683,41 @@ def load_args_from_checkpoint(
     return args, checkpoint_args
 
 
+def _install_dmi_exact_load_state(args, state_dict, *, release):
+    if not bool(getattr(args, "dmi_exact_resume", False)):
+        return False
+    if not isinstance(state_dict, dict):
+        raise RuntimeError("DMI exact resume could not read checkpoint common state")
+    if state_dict.get("checkpoint_kind") == "model_salvage":
+        raise RuntimeError(
+            "DMI exact resume rejects model-salvage checkpoints; start a new "
+            "logical run explicitly to use this checkpoint"
+        )
+    if state_dict.get("checkpoint_kind") != "exact_training":
+        raise RuntimeError("checkpoint is not a committed DMI exact-training checkpoint")
+    if state_dict.get("dmi_exact_resume") is not True:
+        raise RuntimeError("checkpoint is missing its DMI exact-resume commit marker")
+    if "dmi_resume_state" not in state_dict:
+        raise RuntimeError("checkpoint is missing dmi_resume_state")
+    if "iteration" not in state_dict:
+        raise RuntimeError("DMI exact checkpoint is missing its native iteration")
+    from integration.megatron_exact_resume import install_loaded_resume_state
+
+    install_loaded_resume_state(
+        args,
+        state_dict["dmi_resume_state"],
+        checkpoint_iteration=int(state_dict["iteration"]),
+        release=bool(release),
+    )
+    rerun_state = state_dict.get("rerun_state_machine")
+    active_rerun = (
+        rerun_state is not None
+        and get_rerun_state_machine().validate_state_dict(rerun_state)
+    )
+    args._dmi_exact_active_rerun_checkpoint = bool(active_rerun)
+    return bool(active_rerun)
+
+
 def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', strict=True,
                     checkpointing_context=None, skip_load_to_model_and_opt=False, tp_group: Optional[torch.distributed.ProcessGroup] = None, pp_group: Optional[torch.distributed.ProcessGroup] = None, dp_cp_group: Optional[torch.distributed.ProcessGroup] = None):
     """Load a model checkpoint and return the iteration.
@@ -1634,6 +1767,14 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
             pass    # Not loaded.
         else:
             raise NotImplementedError(f"checkpoint format {ckpt_format} not supported")
+        if state_dict is not None:
+            active_dmi_rerun = _install_dmi_exact_load_state(
+                args, state_dict, release=release
+            )
+            if active_dmi_rerun and ckpt_format != "torch_dist":
+                raise RuntimeError(
+                    "DMI exact resume requires torch_dist for an active rerun checkpoint"
+                )
 
     load_kwargs = {}
     ignore_rng_state = False
@@ -1746,6 +1887,13 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
                 )
                 ignore_rerun_state = False
         if (
+            getattr(args, "_dmi_exact_active_rerun_checkpoint", False)
+            and ignore_rerun_state
+        ):
+            raise RuntimeError(
+                "DMI exact resume could not restore the active Megatron rerun state"
+            )
+        if (
             ckpt_world_size != run_world_size
             or ckpt_tp_pp != run_tp_pp
             or ckpt_dp != run_dp
@@ -1828,6 +1976,18 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
         # Iteration and num_floating_point_operations_so_far default to 0.
         return 0, 0
 
+    if (
+        bool(getattr(args, "dmi_exact_resume", False))
+        and not hasattr(args, "_dmi_loaded_resume_state")
+    ):
+        active_dmi_rerun = _install_dmi_exact_load_state(
+            args, state_dict, release=release
+        )
+        if active_dmi_rerun and ckpt_format != "torch_dist":
+            raise RuntimeError(
+                "DMI exact resume requires torch_dist for an active rerun checkpoint"
+            )
+
     # Set checkpoint version.
     set_checkpoint_version(state_dict.get('checkpoint_version', 0))
 
@@ -1862,6 +2022,20 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
         update_num_microbatches(consumed_samples=args.consumed_train_samples, verbose=True)
         args.consumed_valid_samples = getattr(checkpoint_args,
                                               'consumed_valid_samples', 0)
+        dmi_loaded_state = getattr(args, "_dmi_loaded_resume_state", None)
+        if dmi_loaded_state is not None:
+            if int(args.consumed_train_samples) != int(
+                dmi_loaded_state["consumed_train_samples"]
+            ):
+                raise RuntimeError(
+                    "Megatron checkpoint args and DMI consumed_train_samples disagree"
+                )
+            if int(args.consumed_valid_samples) != int(
+                dmi_loaded_state["consumed_valid_samples"]
+            ):
+                raise RuntimeError(
+                    "Megatron checkpoint args and DMI consumed_valid_samples disagree"
+                )
     else:
         print_rank_0('could not find arguments in the checkpoint ...')
 
@@ -1944,7 +2118,21 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
             if 'rerun_state_machine' in state_dict:
                 get_rerun_state_machine().load_state_dict(state_dict['rerun_state_machine'])
         except Exception as e:
+            if bool(getattr(args, "dmi_exact_resume", False)):
+                raise RuntimeError(
+                    "DMI exact resume failed to restore Megatron rerun state"
+                ) from e
             print_rank_0(f"Unable to restore RerunMachine from checkpoint: {e}. Skipping.")
+    if getattr(args, "_dmi_exact_active_rerun_checkpoint", False):
+        if ignore_rerun_state:
+            raise RuntimeError(
+                "DMI exact resume lost an active Megatron rerun checkpoint"
+            )
+        args._dmi_rerun_sampler_extra_consumed_samples = int(
+            args.global_batch_size
+        )
+    else:
+        args._dmi_rerun_sampler_extra_consumed_samples = 0
 
     # rng states.
     if not release and not args.finetune and not args.no_load_rng and not ignore_rng_state:
@@ -1999,6 +2187,21 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
                          'attempting to load the rng state, '
                          'exiting ...'.format(checkpoint_name))
             sys.exit()
+
+    if (
+        bool(getattr(args, "dmi_exact_resume", False))
+        and getattr(args, "_dmi_loaded_resume_state", None) is not None
+    ):
+        # The loaded RNG snapshot already includes the initial DataLoader
+        # iterator's pre-training base-seed draw. Save it before resume
+        # reconstructs that iterator and repeats the pre-snapshot operation.
+        if ignore_rng_state:
+            raise RuntimeError("DMI exact resume could not restore Megatron RNG state")
+        from integration.megatron_exact_resume import (
+            capture_dmi_exact_loaded_rng_state,
+        )
+
+        capture_dmi_exact_loaded_rng_state(args)
 
     # Some utilities want to load a checkpoint without distributed being initialized
     if torch.distributed.is_initialized():

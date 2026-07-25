@@ -1,5 +1,6 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+import copy
 import os
 from unittest.mock import patch
 
@@ -657,6 +658,146 @@ def test_distrib_optimizer_save_load_with_non_tensor_state(use_precision_aware):
 
     # This should not crash - non-tensor entries should be skipped
     distrib_optim.load_parameter_state_from_dp_reshardable(saved_state)
+
+
+def test_cpu_offloaded_distrib_optimizer_resume_next_step():
+    """A restored CPU-offloaded AdamW update must match uninterrupted training."""
+    world = int(os.getenv('WORLD_SIZE', '1'))
+    rank = int(os.getenv('RANK', '0'))
+    _init_distributed(world, rank)
+    Utils.initialize_model_parallel()
+
+    def build_model_and_optimizer():
+        model = torch.nn.Linear(16, 16, bias=False, dtype=torch.bfloat16, device='cuda')
+        model.requires_grad_(True)
+        ddp_config = DistributedDataParallelConfig(
+            use_distributed_optimizer=True,
+            grad_reduce_in_fp32=False,
+        )
+        model = DistributedDataParallel(
+            TransformerConfig(num_attention_heads=1, num_layers=1),
+            ddp_config,
+            model,
+        )
+        optimizer_config = OptimizerConfig(
+            optimizer='adam',
+            lr=2.0e-5,
+            weight_decay=0.0,
+            bf16=True,
+            use_distributed_optimizer=True,
+            use_precision_aware_optimizer=True,
+            main_params_dtype=torch.float16,
+            main_grads_dtype=torch.bfloat16,
+            exp_avg_dtype=torch.bfloat16,
+            exp_avg_sq_dtype=torch.bfloat16,
+            optimizer_cpu_offload=True,
+            optimizer_offload_fraction=1.0,
+            use_torch_optimizer_for_cpu_offload=True,
+            overlap_cpu_optimizer_d2h_h2d=False,
+            clip_grad=1.0,
+        )
+        return model, get_megatron_optimizer(optimizer_config, [model])
+
+    def run_step(model, optimizer, gradient):
+        optimizer.zero_grad()
+        model_param = next(model.parameters())
+        model_param.main_grad.copy_(gradient)
+        success, _, _ = optimizer.step()
+        assert success
+        torch.cuda.synchronize()
+
+    def clone_tensors(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().clone()
+        if isinstance(value, dict):
+            return {key: clone_tensors(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [clone_tensors(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(clone_tensors(item) for item in value)
+        return copy.deepcopy(value)
+
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+    reference_model, reference_optimizer = build_model_and_optimizer()
+    gradients = [
+        torch.randn(16, 16, dtype=torch.bfloat16, device='cuda')
+        for _ in range(6)
+    ]
+    for gradient in gradients[:5]:
+        run_step(reference_model, reference_optimizer, gradient)
+
+    saved_model = clone_tensors(reference_model.state_dict())
+    distributed_optimizer = reference_optimizer.chained_optimizers[0]
+    saved_optimizer = clone_tensors(reference_optimizer.state_dict())
+    saved_optimizer['param_state'] = clone_tensors(
+        distributed_optimizer.get_parameter_state_dp_reshardable()
+    )
+    saved_optimizer['param_state_sharding_type'] = 'dp_reshardable'
+    saved_steps = {
+        group['step'] for group in saved_optimizer['optimizer']['param_groups']
+    }
+    assert saved_steps == {5}
+    for key, value in saved_optimizer['param_state'].items():
+        if key in {'per_bucket_numel', 'per_bucket_numel_unpadded'}:
+            continue
+        for buckets in value.values():
+            for bucket in buckets:
+                for param_state in bucket:
+                    param_state['padding'] = False
+                    if 'step' in param_state:
+                        # dp_reshardable stores step as a nonpersistent load-time
+                        # placeholder; param_groups contain the authoritative value.
+                        param_state['step'] = torch.tensor(1.0)
+
+    run_step(reference_model, reference_optimizer, gradients[5])
+    expected_model = clone_tensors(reference_model.state_dict())
+
+    restored_model, restored_optimizer = build_model_and_optimizer()
+    restored_model.load_state_dict(saved_model)
+    restored_optimizer.load_state_dict(saved_optimizer)
+    restored_distributed_optimizer = restored_optimizer.chained_optimizers[0]
+    restored_param_state = restored_distributed_optimizer.get_parameter_state_dp_reshardable()
+    for key, expected_value in saved_optimizer['param_state'].items():
+        if key in {'per_bucket_numel', 'per_bucket_numel_unpadded'}:
+            assert restored_param_state[key] == expected_value
+            continue
+        for expected_buckets, actual_buckets in zip(
+            expected_value.values(),
+            restored_param_state[key].values(),
+        ):
+            for expected_bucket, actual_bucket in zip(
+                expected_buckets,
+                actual_buckets,
+            ):
+                for expected_param_state, actual_param_state in zip(
+                    expected_bucket,
+                    actual_bucket,
+                ):
+                    for state_key, expected_tensor in expected_param_state.items():
+                        if not isinstance(expected_tensor, torch.Tensor):
+                            continue
+                        if state_key == 'step':
+                            assert actual_param_state[state_key].item() == 5
+                            continue
+                        torch.testing.assert_close(
+                            actual_param_state[state_key],
+                            expected_tensor,
+                            atol=0,
+                            rtol=0,
+                        )
+    run_step(restored_model, restored_optimizer, gradients[5])
+
+    actual_model = restored_model.state_dict()
+    assert actual_model.keys() == expected_model.keys()
+    for key in actual_model:
+        torch.testing.assert_close(
+            actual_model[key],
+            expected_model[key],
+            atol=0,
+            rtol=0,
+            msg=lambda message, key=key: f'{key}: {message}',
+        )
 
 
 @pytest.mark.parametrize("use_distributed_optimizer", [False, True])

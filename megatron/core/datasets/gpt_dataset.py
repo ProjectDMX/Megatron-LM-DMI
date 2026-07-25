@@ -5,7 +5,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from math import ceil
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy
 import torch
@@ -111,6 +111,9 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
 
     dmi_dynamic_mixture_num_workers: int = -1
     """Configured DataLoader worker count, validated by the dynamic path."""
+
+    dmi_dynamic_mixture_resume_state: Optional[Dict[str, Any]] = None
+    """Internal exact-resume state loaded from the Megatron checkpoint."""
 
     def __post_init__(self) -> None:
         """Do asserts and set fields post init"""
