@@ -459,8 +459,6 @@ def core_gpt_dataset_config_from_args(args):
     if data_args["dmi_dynamic_mixture_control_url"] is not None:
         if not args.sft:
             raise RuntimeError("DMI dynamic mixture requires --sft")
-        if int(args.num_workers) != 0:
-            raise RuntimeError("DMI dynamic mixture requires --num-workers 0")
         if int(args.data_parallel_size) != 1:
             raise RuntimeError("the first DMI dynamic mixture path requires DP=1")
         required_dynamic = {
