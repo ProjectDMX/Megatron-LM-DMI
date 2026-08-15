@@ -217,6 +217,7 @@ class TopKRouter(Router):
         if self.config.moe_enable_routing_replay:
             self.router_replay = RouterReplay()
 
+        self.dmi_router_logits = None
         self.dmi_router_probs_mean = None
         self.dmi_router_token_entropy_mean = None
         self.dmi_pre_drop_token_count = None
@@ -226,6 +227,7 @@ class TopKRouter(Router):
         """Set the layer number for the router."""
         super().set_layer_number(layer_number)
         for hook in (
+            self.dmi_router_logits,
             self.dmi_router_probs_mean,
             self.dmi_router_token_entropy_mean,
             self.dmi_pre_drop_token_count,
@@ -233,6 +235,11 @@ class TopKRouter(Router):
         ):
             if hook is not None and hook.spec is not None:
                 hook.spec = replace(hook.spec, layer_no=int(layer_number) - 1)
+
+    def _dmi_router_logits_by_sample(self, logits: torch.Tensor) -> torch.Tensor:
+        from integration.megatron_router_logits import router_logits_by_sample
+
+        return router_logits_by_sample(logits)
 
     def _dmi_router_probs_mean_from_logits(
         self,
@@ -772,6 +779,8 @@ class TopKRouter(Router):
                 logits, self.config.moe_router_force_biased, self.layer_number
             )
 
+        if self.dmi_router_logits is not None:
+            self.dmi_router_logits(logits)
         if self.dmi_router_probs_mean is not None:
             self.dmi_router_probs_mean(logits, self.dmi_router_probs_mean.valid_count_fwd)
         if self.dmi_router_token_entropy_mean is not None:
