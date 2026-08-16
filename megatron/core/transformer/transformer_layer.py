@@ -575,6 +575,9 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             FineGrainedActivationOffloadingInterface as off_interface,
         )
 
+        if self.dmi_hidden_states is not None:
+            self.dmi_hidden_states(hidden_states)
+
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         # Optional Input Layer norm
@@ -701,11 +704,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         This method calls the core computation of a transformer layer, including
         self-attention, cross-attention (if applicable), and feed-forward operations.
         """
-        if self.dmi_hidden_states is not None:
-            if len(args) > 0:
-                self.dmi_hidden_states(args[0])
-            else:
-                self.dmi_hidden_states(kwargs["hidden_states"])
         hidden_states, context = self._forward_attention(*args, **kwargs)
         output = self._forward_mlp(
             hidden_states,

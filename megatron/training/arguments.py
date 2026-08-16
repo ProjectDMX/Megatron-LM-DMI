@@ -3417,6 +3417,21 @@ def _add_dmi_args(parser):
         help='DMI HookPointV1 hook selection name.',
     )
     group.add_argument(
+        '--dmi-flush-every-n-train-iters',
+        type=int,
+        default=None,
+        help=(
+            'Durably flush DMI after every N accepted training iterations; '
+            'zero disables periodic iteration-boundary flushing.'
+        ),
+    )
+    group.add_argument(
+        '--dmi-vocab-logits-top-k',
+        type=int,
+        default=None,
+        help='Fixed vocabulary top-K captured by the DMI vocab-logits-topk hook.',
+    )
+    group.add_argument(
         '--dmi-recompute-hook',
         type=str,
         default=None,

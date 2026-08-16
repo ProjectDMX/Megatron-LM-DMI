@@ -8,6 +8,44 @@ import torch
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
 
+try:
+    from integration.megatron_schedule_runtime import (
+        dmi_abort_te_forward_capture,
+        dmi_begin_te_forward_capture,
+        dmi_finish_te_forward_capture,
+        dmi_force_eager_unit,
+        dmi_is_enabled,
+        dmi_is_te_capture_session_active,
+        dmi_prepare_te_forward_replay,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name not in {"integration", "integration.megatron_schedule_runtime"}:
+        raise
+
+    def dmi_abort_te_forward_capture():
+        pass
+
+    def dmi_begin_te_forward_capture():
+        pass
+
+    def dmi_finish_te_forward_capture():
+        return None
+
+    def dmi_force_eager_unit():
+        from contextlib import nullcontext
+
+        return nullcontext()
+
+    def dmi_is_enabled():
+        return False
+
+    def dmi_is_te_capture_session_active():
+        return False
+
+    def dmi_prepare_te_forward_replay(plan):
+        del plan
+        return False
+
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.transformer.enums import CudaGraphScope
@@ -302,6 +340,19 @@ class GraphableMegatronModule(MegatronModule):
             ), "CUDA graph accepts only Tensor inputs."
 
         cg_index = getattr(self, 'current_microbatch', 0) % len(self.cuda_graphs)
+        if dmi_is_enabled():
+            plans = getattr(self, '_dmi_te_forward_plans', None)
+            if plans is None:
+                raise RuntimeError("Megatron DMI TE replay is missing forward plans")
+            if len(plans) != len(self.cuda_graphs):
+                raise RuntimeError(
+                    "Megatron DMI TE plan/graph count mismatch at replay: "
+                    f"{len(plans)} != {len(self.cuda_graphs)}"
+                )
+            if dmi_prepare_te_forward_replay(plans[cg_index]):
+                with dmi_force_eager_unit():
+                    return self._te_cuda_graph_capture(*args, **kwargs)
+
         cudagraph_args, cudagraph_kwargs = self._get_te_cuda_graph_replay_args(*args, **kwargs)
 
         for hook, hook_args in self.cuda_graph_manual_hooks:
@@ -349,6 +400,23 @@ class GraphableMegatronModule(MegatronModule):
             if not self.cuda_graphs:
                 # Do CUDA Graphs capture.
                 cuda_graph_func = self._te_cuda_graph_capture
+                if (
+                    dmi_is_te_capture_session_active()
+                    and torch.cuda.is_current_stream_capturing()
+                ):
+                    dmi_begin_te_forward_capture()
+                    try:
+                        result = cuda_graph_func(*args, **kwargs)
+                        plan = dmi_finish_te_forward_capture()
+                    except BaseException:
+                        dmi_abort_te_forward_capture()
+                        raise
+                    plans = getattr(self, '_dmi_te_captured_forward_plans', None)
+                    if plans is None:
+                        plans = []
+                        self._dmi_te_captured_forward_plans = plans
+                    plans.append(plan)
+                    return result
             else:
                 # Do CUDA Graphs replay.
                 cuda_graph_func = self._te_cuda_graph_replay

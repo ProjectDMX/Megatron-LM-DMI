@@ -121,6 +121,8 @@ class GPTModel(LanguageModule):
         self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
         self.vp_stage = vp_stage
         self.disable_param_offloading = True
+        self.dmi_vocab_logits = None
+        self.dmi_vocab_logits_topk = None
 
         if hasattr(self.config, 'position_embedding_type'):
             self.position_embedding_type = self.config.position_embedding_type
@@ -678,6 +680,11 @@ class GPTModel(LanguageModule):
 
         # Apply MuP output scaling to logits
         logits = self._scale_logits(logits)
+
+        if labels is not None and self.dmi_vocab_logits is not None:
+            self.dmi_vocab_logits(logits)
+        if labels is not None and self.dmi_vocab_logits_topk is not None:
+            self.dmi_vocab_logits_topk(logits)
 
         # Restore sequence parallel execution to the output layer if necessary.
         if sequence_parallel_override:

@@ -58,6 +58,8 @@ class TestGPTModel:
     @pytest.mark.internal
     def test_constructor(self):
         assert isinstance(self.gpt_model, GPTModel)
+        assert self.gpt_model.dmi_vocab_logits is None
+        assert self.gpt_model.dmi_vocab_logits_topk is None
 
         assert self.gpt_model.max_sequence_length == 4
 

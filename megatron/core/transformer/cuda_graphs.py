@@ -71,15 +71,20 @@ logger = logging.getLogger(__name__)
 try:
     from integration.megatron_schedule_runtime import (
         dmi_abort_cuda_graph_capture,
+        dmi_begin_te_capture_session,
         dmi_begin_cuda_graph_capture,
         dmi_finish_cuda_graph_capture,
+        dmi_finish_te_capture_session,
         dmi_force_eager_unit,
         dmi_prepare_local_backward_replay,
         dmi_prepare_local_forward_boundary,
         dmi_prepare_local_forward_replay,
         dmi_take_local_backward_token,
     )
-except Exception:
+except ModuleNotFoundError as exc:
+    if exc.name not in {"integration", "integration.megatron_schedule_runtime"}:
+        raise
+
     def dmi_begin_cuda_graph_capture(*, warmup_enabled=True, capture_direction=None):
         del warmup_enabled, capture_direction
 
@@ -87,6 +92,12 @@ except Exception:
         return None
 
     def dmi_abort_cuda_graph_capture():
+        pass
+
+    def dmi_begin_te_capture_session():
+        return False
+
+    def dmi_finish_te_capture_session():
         pass
 
     def dmi_prepare_local_forward_boundary(runner):
@@ -122,6 +133,35 @@ except ImportError:
 def is_graph_capturing():
     """Query if currently capturing."""
     return _IS_GRAPH_CAPTURING
+
+
+def _dmi_finalize_te_forward_plans(layer) -> None:
+    """Validate and bind captured DMI plans to the layer's TE graph indices."""
+
+    captured_plans = getattr(layer, '_dmi_te_captured_forward_plans', None)
+    if captured_plans is None:
+        raise RuntimeError(
+            "Megatron DMI TE capture produced no forward-plan list "
+            f"for layer {getattr(layer, 'layer_number', '<unknown>')}"
+        )
+    if len(captured_plans) != len(layer.cuda_graphs):
+        raise RuntimeError(
+            "Megatron DMI TE plan/graph count mismatch for layer "
+            f"{getattr(layer, 'layer_number', '<unknown>')}: "
+            f"{len(captured_plans)} != {len(layer.cuda_graphs)}"
+        )
+    if captured_plans:
+        expected_plan = captured_plans[0]
+        for plan in captured_plans[1:]:
+            expected_plan.assert_compatible(plan)
+    layer._dmi_te_forward_plans = tuple(captured_plans)
+    delattr(layer, '_dmi_te_captured_forward_plans')
+
+
+def _dmi_clear_te_forward_plans(layer) -> None:
+    for attr_name in ('_dmi_te_captured_forward_plans', '_dmi_te_forward_plans'):
+        if hasattr(layer, attr_name):
+            delattr(layer, attr_name)
 
 
 def _set_capture_start():
@@ -2393,10 +2433,18 @@ class TECudaGraphHelper:
                 rng_context = get_cuda_rng_tracker().fork()
             else:
                 rng_context = nullcontext()
-            with rng_context:
-                graphs = make_graphed_callables(
-                    tuple(self.flattened_callables), sample_args, **kwargs
-                )
+            dmi_te_session_started = dmi_begin_te_capture_session()
+            if dmi_te_session_started:
+                for layer in self.flattened_callables:
+                    _dmi_clear_te_forward_plans(layer)
+            try:
+                with rng_context:
+                    graphs = make_graphed_callables(
+                        tuple(self.flattened_callables), sample_args, **kwargs
+                    )
+            finally:
+                if dmi_te_session_started:
+                    dmi_finish_te_capture_session()
 
             # Push the captured graphs to the corresponding TransformerBlock.
             num_layers_accumulated = 0
@@ -2415,6 +2463,8 @@ class TECudaGraphHelper:
                                 + layer_number
                             )
                         layer.cuda_graphs.append(graphs[graph_idx])
+                    if dmi_te_session_started:
+                        _dmi_finalize_te_forward_plans(layer)
                 num_layers_accumulated += len(layers)
 
             self._graphs_created = True
@@ -2449,6 +2499,7 @@ class TECudaGraphHelper:
                         graphs_not_reset += 1
                 layer.cuda_graphs = []
                 layer.cuda_graph_manual_hooks = []
+                _dmi_clear_te_forward_plans(layer)
 
         log_on_each_pipeline_stage(
             logger=logger,
