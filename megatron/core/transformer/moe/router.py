@@ -222,6 +222,7 @@ class TopKRouter(Router):
         self.dmi_router_token_entropy_mean = None
         self.dmi_pre_drop_token_count = None
         self.dmi_post_drop_token_count = None
+        self.dmi_router_topk = None
 
     def set_layer_number(self, layer_number: int):
         """Set the layer number for the router."""
@@ -232,6 +233,7 @@ class TopKRouter(Router):
             self.dmi_router_token_entropy_mean,
             self.dmi_pre_drop_token_count,
             self.dmi_post_drop_token_count,
+            self.dmi_router_topk,
         ):
             if hook is not None and hook.spec is not None:
                 hook.spec = replace(hook.spec, layer_no=int(layer_number) - 1)
@@ -240,6 +242,40 @@ class TopKRouter(Router):
         from integration.megatron_router_logits import router_logits_by_sample
 
         return router_logits_by_sample(logits)
+
+    def _dmi_router_topk_from_routing(
+        self,
+        probs: torch.Tensor,
+        routing_map: torch.Tensor,
+        seq_length: int,
+        bsz: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if probs.dim() != 2 or routing_map.dim() != 2:
+            raise ValueError("DMI router-topk requires 2D routing tensors")
+        if probs.shape != routing_map.shape:
+            raise ValueError("DMI router-topk probability and map shapes differ")
+        expert_ids = torch.arange(
+            routing_map.shape[1],
+            dtype=torch.int64,
+            device=routing_map.device,
+        ).unsqueeze(0)
+        masked_ids = torch.where(
+            routing_map,
+            expert_ids,
+            routing_map.shape[1],
+        )
+        selected_ids = torch.topk(
+            masked_ids,
+            k=self.topk,
+            dim=1,
+            largest=False,
+            sorted=True,
+        ).values
+        selected_weights = torch.gather(probs, dim=1, index=selected_ids)
+        output_shape = (int(seq_length), int(bsz), int(self.topk))
+        selected_ids = selected_ids.view(output_shape).transpose(0, 1).contiguous()
+        selected_weights = selected_weights.view(output_shape).transpose(0, 1).contiguous()
+        return selected_ids, selected_weights
 
     def _dmi_router_probs_mean_from_logits(
         self,
@@ -790,6 +826,14 @@ class TopKRouter(Router):
             )
 
         probs, routing_map = self.routing(logits, padding_mask=padding_mask)
+
+        if self.dmi_router_topk is not None:
+            self.dmi_router_topk(
+                probs,
+                routing_map,
+                input.shape[0],
+                input.shape[1],
+            )
 
         return probs, routing_map
 

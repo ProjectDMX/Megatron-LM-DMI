@@ -231,6 +231,7 @@ class MoELayer(BaseMoELayer):
             config.recompute_granularity == 'selective'
             and "shared_experts" in config.recompute_modules
         )
+        self.dmi_moe_packed_weighted_output = None
 
         self.tp_group = pg_collection.tp
 
@@ -489,6 +490,11 @@ class MoELayer(BaseMoELayer):
                 dispatched_input, tokens_per_expert, permuted_probs
             )
         assert mlp_bias is None, f"mlp_bias is not supported for {type(self.token_dispatcher)}"
+        # The packed weighted-output row count is known only here.  DMI sizes
+        # this IDENTITY payload from expert_output at eager runtime; a CUDA Graph
+        # plan would freeze the capture-time extent and is unsupported for this hook.
+        if self.dmi_moe_packed_weighted_output is not None:
+            self.dmi_moe_packed_weighted_output(expert_output)
         output = self.token_dispatcher.combine_preprocess(expert_output)
 
         return output, mlp_bias

@@ -460,6 +460,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         ]
 
         self.shared_experts = None
+        self.dmi_moe_inverse_map = None
 
     def set_shared_experts(self, shared_experts):
         """Set shared expert to the dispatcher."""
@@ -646,6 +647,10 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             fused=self.config.moe_permute_fusion,
             drop_and_pad=self.drop_and_pad,
         )
+        # DMI's first inverse-map implementation is eager-only.  Do not execute this
+        # hook under CUDA Graph capture or replay; graph support needs its own plan.
+        if self.dmi_moe_inverse_map is not None:
+            self.dmi_moe_inverse_map(self.reversed_local_input_permutation_mapping)
         return permutated_local_input_tokens, permuted_probs
 
     def token_dispatch(self, permutated_local_input_tokens, permuted_probs):
