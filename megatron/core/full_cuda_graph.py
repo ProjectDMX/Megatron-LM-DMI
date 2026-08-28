@@ -11,7 +11,7 @@ from megatron.core.tensor_parallel.random import get_all_rng_states
 logger = logging.getLogger(__name__)
 
 try:
-    from integration.megatron_schedule_runtime import (
+    from dmi_megatron_integration.schedule_runtime import (
         dmi_abort_cuda_graph_capture,
         dmi_begin_cuda_graph_capture,
         dmi_current_phase,

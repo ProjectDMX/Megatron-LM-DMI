@@ -1018,7 +1018,7 @@ def pretrain(
         checkpointing_context = {}
 
     if getattr(args, "dmi_exact_resume", False):
-        from integration.megatron_exact_resume import configure_dmi_exact_execution
+        from dmi_megatron_integration.exact_resume import configure_dmi_exact_execution
 
         configure_dmi_exact_execution(args)
 
@@ -1035,10 +1035,10 @@ def pretrain(
     dmi_env_enable = str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on")
     if getattr(args, "dmi_enable", None) or dmi_env_enable:
         try:
-            from integration.megatron_startup import setup_megatron_dmi
+            from dmi_megatron_integration.startup import setup_megatron_dmi
         except ImportError as exc:
             raise RuntimeError(
-                "DMI was enabled, but integration.megatron_startup is not importable. "
+                "DMI was enabled, but dmi_megatron_integration.startup is not importable. "
                 "Run Megatron with the DMI repository on PYTHONPATH."
             ) from exc
         dmi_handle = setup_megatron_dmi(
@@ -1049,7 +1049,7 @@ def pretrain(
             dataset_provider=train_valid_test_dataset_provider,
         )
         if getattr(args, "dmi_exact_resume", False):
-            from integration.megatron_exact_resume import setup_dmi_exact_resume
+            from dmi_megatron_integration.exact_resume import setup_dmi_exact_resume
 
             setup_dmi_exact_resume(args, dmi_handle, printer=print_rank_0)
         if args.perform_rl_step:
@@ -1170,7 +1170,7 @@ def pretrain(
     print_datetime('after dataloaders are built')
     app_metrics['app_build_dataiters_finish_time'] = one_logger_utils.get_timestamp_in_ms()
     if getattr(args, "dmi_exact_resume", False):
-        from integration.megatron_exact_resume import validate_dmi_exact_dataset_restore
+        from dmi_megatron_integration.exact_resume import validate_dmi_exact_dataset_restore
 
         validate_dmi_exact_dataset_restore(args)
 
@@ -1266,7 +1266,7 @@ def pretrain(
             )
         else:
             if getattr(args, "dmi_enable", None) or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
-                from integration.megatron_schedule_runtime import dmi_enter_phase
+                from dmi_megatron_integration.schedule_runtime import dmi_enter_phase
 
                 dmi_enter_phase(
                     "valid",
@@ -1287,7 +1287,7 @@ def pretrain(
     if args.do_test:
         prefix = f'iteration {iteration} on test set'
         if getattr(args, "dmi_enable", None) or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
-            from integration.megatron_schedule_runtime import dmi_enter_phase
+            from dmi_megatron_integration.schedule_runtime import dmi_enter_phase
 
             dmi_enter_phase(
                 "test",
@@ -1326,7 +1326,7 @@ def pretrain(
     if dmi_handle is not None:
         dmi_handle.close()
         if getattr(args, "dmi_exact_resume", False):
-            from integration.megatron_exact_resume import clear_active_dmi_exact_resume
+            from dmi_megatron_integration.exact_resume import clear_active_dmi_exact_resume
 
             clear_active_dmi_exact_resume()
 
@@ -1859,7 +1859,7 @@ def train_step(
             iteration=iteration,
             dmi_handle=None,
         )
-    from integration.megatron_schedule_runtime import (
+    from dmi_megatron_integration.schedule_runtime import (
         dmi_begin_logical_iteration,
         dmi_finish_logical_iteration,
     )
@@ -1897,7 +1897,7 @@ def _train_step_impl(
 
     rerun_state_machine = get_rerun_state_machine()
     if dmi_handle is not None:
-        from integration.megatron_schedule_runtime import (
+        from dmi_megatron_integration.schedule_runtime import (
             dmi_begin_attempt,
             dmi_finish_attempt,
         )
@@ -3007,7 +3007,7 @@ def train(
 
     start_iteration = iteration
     if getattr(args, "dmi_enable", None) or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
-        from integration.megatron_schedule_runtime import dmi_enter_phase
+        from dmi_megatron_integration.schedule_runtime import dmi_enter_phase
 
         dmi_enter_phase(
             "train",
@@ -3049,7 +3049,7 @@ def train(
     # seed is unused. With workers, rewinding its source RNG while retaining the
     # cached seed for later worker initialization would be inconsistent.
     if getattr(args, "dmi_exact_resume", False):
-        from integration.megatron_exact_resume import restore_dmi_exact_loaded_rng_state
+        from dmi_megatron_integration.exact_resume import restore_dmi_exact_loaded_rng_state
 
         restore_dmi_exact_loaded_rng_state(args)
 
@@ -3324,7 +3324,7 @@ def train(
                 gc.collect()
             prefix = f'iteration {iteration}'
             if getattr(args, "dmi_enable", None) or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
-                from integration.megatron_schedule_runtime import dmi_enter_phase
+                from dmi_megatron_integration.schedule_runtime import dmi_enter_phase
 
                 dmi_enter_phase(
                     "valid",
@@ -3388,7 +3388,7 @@ def train(
                     in ("1", "true", "yes", "on")
                 )
             ):
-                from integration.megatron_schedule_runtime import dmi_enter_phase
+                from dmi_megatron_integration.schedule_runtime import dmi_enter_phase
 
                 dmi_enter_phase(
                     "train",
@@ -3687,7 +3687,7 @@ def evaluate_and_print_results(
             or str(os.getenv("DMI_ENABLE", "")).strip().lower()
             in ("1", "true", "yes", "on")
         ):
-            from integration.megatron_schedule_runtime import dmi_set_dataset_id_override
+            from dmi_megatron_integration.schedule_runtime import dmi_set_dataset_id_override
 
             dmi_set_dataset_id_override(index)
             dmi_dataset_override_active = True

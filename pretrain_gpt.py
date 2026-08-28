@@ -52,11 +52,8 @@ from megatron.training.utils import (
 from model_provider import model_provider
 
 try:
-    from integration.megatron_hook_requirements import (
-        hook_selection_requires_valid_count,
-        parse_hook_selection,
-    )
-    from integration.megatron_schedule_runtime import (
+    from dmi_megatron_integration.hooks.selection import parse_hook_selection
+    from dmi_megatron_integration.schedule_runtime import (
         dmi_enter_current_scope,
         dmi_record_current_microbatch_metadata,
     )
@@ -66,10 +63,6 @@ except Exception:
         if "" in selected:
             raise ValueError(f"Invalid empty DMI hook selection entry: {selection!r}")
         return selected
-
-    def hook_selection_requires_valid_count(selection):
-        del selection
-        return True
 
     def dmi_record_current_microbatch_metadata(
         valid_count,
@@ -118,14 +111,19 @@ def _dmi_hook_selected(args, name: str) -> bool:
     return name in _dmi_selected_hooks(args)
 
 
-def _dmi_needs_valid_count(args) -> bool:
-    selection = getattr(args, "dmi_hook_selection", None)
-    if selection is None:
-        selection = os.getenv("DMI_HOOK_SELECTION", "router-summary")
-    selected = parse_hook_selection(selection)
-    return hook_selection_requires_valid_count(selected) or (
-        bool(getattr(args, "sft", False)) and "loss-summary" in selected
-    )
+def _dmi_required_metadata_fields(args) -> tuple[str, ...]:
+    if not _dmi_is_enabled(args):
+        return ()
+    fields = getattr(args, "dmi_required_metadata_fields", None)
+    if fields is None:
+        raise RuntimeError(
+            "DMI startup did not publish args.dmi_required_metadata_fields"
+        )
+    if not isinstance(fields, tuple) or not all(
+        isinstance(field, str) for field in fields
+    ):
+        raise TypeError("args.dmi_required_metadata_fields must be a tuple[str, ...]")
+    return fields
 
 
 def get_batch(data_iterator, vp_stage: Optional[int] = None):
@@ -425,7 +423,10 @@ def core_gpt_dataset_config_from_args(args):
         "data_parallel_size": args.data_parallel_size,
         "sequence_parallel_size": args.tensor_model_parallel_size*args.sequence_parallel,
         "hybrid_context_parallel": args.hybrid_context_parallel,
-        "dmi_metadata_enabled": _dmi_is_enabled(args) and _dmi_needs_valid_count(args),
+        "dmi_metadata_enabled": bool(
+            {"valid_count", "segment_metadata"}
+            & set(_dmi_required_metadata_fields(args))
+        ),
         "dmi_packed_max_conversations_per_row": (
             getattr(args, "dmi_packed_max_conversations_per_row", None)
         ),

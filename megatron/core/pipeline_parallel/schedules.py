@@ -42,7 +42,7 @@ from .combined_1f1b import (
 from .hybrid_cp_schedule import hybrid_context_parallel_forward_backward
 
 try:
-    from integration.megatron_schedule_runtime import (
+    from dmi_megatron_integration.schedule_runtime import (
         dmi_begin_iteration,
         dmi_end_iteration,
         dmi_enter_current_scope,

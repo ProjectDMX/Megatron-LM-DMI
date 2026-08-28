@@ -9,7 +9,7 @@ from torch.autograd import Variable
 from torch.nn.parameter import Parameter
 
 try:
-    from integration.megatron_schedule_runtime import (
+    from dmi_megatron_integration.schedule_runtime import (
         dmi_abort_te_forward_capture,
         dmi_begin_te_forward_capture,
         dmi_finish_te_forward_capture,
@@ -19,7 +19,7 @@ try:
         dmi_prepare_te_forward_replay,
     )
 except ModuleNotFoundError as exc:
-    if exc.name not in {"integration", "integration.megatron_schedule_runtime"}:
+    if exc.name not in {"dmi_megatron_integration", "dmi_megatron_integration.schedule_runtime"}:
         raise
 
     def dmi_abort_te_forward_capture():

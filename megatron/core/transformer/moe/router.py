@@ -239,7 +239,7 @@ class TopKRouter(Router):
                 hook.spec = replace(hook.spec, layer_no=int(layer_number) - 1)
 
     def _dmi_router_logits_by_sample(self, logits: torch.Tensor) -> torch.Tensor:
-        from integration.megatron_router_logits import router_logits_by_sample
+        from dmi_megatron_integration.hooks.megatron_router_logits import router_logits_by_sample
 
         return router_logits_by_sample(logits)
 
@@ -282,7 +282,7 @@ class TopKRouter(Router):
         logits: torch.Tensor,
         valid_count: torch.Tensor,
     ) -> torch.Tensor:
-        from integration.megatron_router_summary import router_probs_mean_from_logits
+        from dmi_megatron_integration.hooks.megatron_router_summary import router_probs_mean_from_logits
 
         return router_probs_mean_from_logits(logits, valid_count, self.score_function)
 
@@ -291,7 +291,7 @@ class TopKRouter(Router):
         logits: torch.Tensor,
         valid_count: torch.Tensor,
     ) -> torch.Tensor:
-        from integration.megatron_router_summary import router_token_entropy_mean_from_logits
+        from dmi_megatron_integration.hooks.megatron_router_summary import router_token_entropy_mean_from_logits
 
         return router_token_entropy_mean_from_logits(logits, valid_count, self.score_function)
 
@@ -302,7 +302,7 @@ class TopKRouter(Router):
         seq_length: int,
         bsz: int,
     ) -> torch.Tensor:
-        from integration.megatron_router_summary import expert_token_count_from_routing_map
+        from dmi_megatron_integration.hooks.megatron_router_summary import expert_token_count_from_routing_map
 
         return expert_token_count_from_routing_map(
             routing_map,

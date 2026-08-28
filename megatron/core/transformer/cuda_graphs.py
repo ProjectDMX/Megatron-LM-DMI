@@ -69,7 +69,7 @@ _IS_GRAPH_WARMUP = False
 logger = logging.getLogger(__name__)
 
 try:
-    from integration.megatron_schedule_runtime import (
+    from dmi_megatron_integration.schedule_runtime import (
         dmi_abort_cuda_graph_capture,
         dmi_begin_te_capture_session,
         dmi_begin_cuda_graph_capture,
@@ -82,7 +82,7 @@ try:
         dmi_take_local_backward_token,
     )
 except ModuleNotFoundError as exc:
-    if exc.name not in {"integration", "integration.megatron_schedule_runtime"}:
+    if exc.name not in {"dmi_megatron_integration", "dmi_megatron_integration.schedule_runtime"}:
         raise
 
     def dmi_begin_cuda_graph_capture(*, warmup_enabled=True, capture_direction=None):

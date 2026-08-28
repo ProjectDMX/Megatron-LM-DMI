@@ -15,11 +15,11 @@ from megatron.training import (
 )
 from megatron.training.arguments import core_transformer_config_from_args
 
-from dmi_training_tool.sft_mixture.moduleformer_pipeline import (
+from tools.sft_mixture.moduleformer_pipeline import (
     ModuleFormerConfig,
     ModuleFormerPipelineModel,
 )
-from integration.megatron_hook_requirements import parse_hook_selection
+from dmi_megatron_integration.hooks.selection import parse_hook_selection
 from pretrain_gpt import (
     forward_step,
     get_embedding_ranks,

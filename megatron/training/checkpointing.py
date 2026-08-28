@@ -511,7 +511,7 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
     exact_enabled = bool(getattr(args, "dmi_exact_resume", False))
     if exact_enabled and not dmi_skip_exact_prepare:
         try:
-            from integration.megatron_exact_resume import prepare_dmi_exact_checkpoint
+            from dmi_megatron_integration.exact_resume import prepare_dmi_exact_checkpoint
 
             dmi_resume_state = prepare_dmi_exact_checkpoint(args, int(iteration))
             dmi_checkpoint_metadata = {
@@ -519,7 +519,7 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
                 "dmi_exact_resume": True,
             }
         except BaseException as exact_error:
-            from integration.megatron_exact_resume import build_dmi_salvage_metadata
+            from dmi_megatron_integration.exact_resume import build_dmi_salvage_metadata
 
             salvage_metadata = build_dmi_salvage_metadata(
                 args,
@@ -922,7 +922,7 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
     logger.debug(f"rank: {rank}, takes {end_misc - start_misc} to finalize ckpt save ")
 
     if exact_enabled and not dmi_skip_exact_prepare:
-        from integration.megatron_exact_resume import (
+        from dmi_megatron_integration.exact_resume import (
             mark_dmi_exact_checkpoint_committed,
         )
 
@@ -1701,7 +1701,7 @@ def _install_dmi_exact_load_state(args, state_dict, *, release):
         raise RuntimeError("checkpoint is missing dmi_resume_state")
     if "iteration" not in state_dict:
         raise RuntimeError("DMI exact checkpoint is missing its native iteration")
-    from integration.megatron_exact_resume import install_loaded_resume_state
+    from dmi_megatron_integration.exact_resume import install_loaded_resume_state
 
     install_loaded_resume_state(
         args,
@@ -2197,7 +2197,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
         # reconstructs that iterator and repeats the pre-snapshot operation.
         if ignore_rng_state:
             raise RuntimeError("DMI exact resume could not restore Megatron RNG state")
-        from integration.megatron_exact_resume import (
+        from dmi_megatron_integration.exact_resume import (
             capture_dmi_exact_loaded_rng_state,
         )
 

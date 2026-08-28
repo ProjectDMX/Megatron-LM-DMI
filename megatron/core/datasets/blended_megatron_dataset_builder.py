@@ -334,7 +334,7 @@ class BlendedMegatronDatasetBuilder(object):
             return BlendedDataset
         if split_index != Split.train.value:
             return BlendedDataset
-        from integration.megatron_dynamic_mixture import DynamicBlendedDataset
+        from dmi_megatron_integration.dynamic_mixture import DynamicBlendedDataset
 
         return DynamicBlendedDataset
 

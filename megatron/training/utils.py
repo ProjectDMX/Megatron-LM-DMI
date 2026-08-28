@@ -46,22 +46,6 @@ from megatron.core.utils import (
 
 from megatron.core.transformer.module import param_is_not_shared
 
-try:
-    from integration.megatron_hook_requirements import (
-        hook_selection_requires_valid_count,
-        parse_hook_selection,
-    )
-except Exception:
-    def parse_hook_selection(selection, *, default="router-summary"):
-        selected = {part.strip() for part in str(selection if selection is not None else default).split(",")}
-        if "" in selected:
-            raise ValueError(f"Invalid empty DMI hook selection entry: {selection!r}")
-        return selected
-
-    def hook_selection_requires_valid_count(selection):
-        del selection
-        return True
-
 
 def calc_params_l2_norm(model, force_create_fp32_copy=False):
     """Calculate l2 norm of parameters"""
@@ -561,13 +545,31 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         getattr(args, "dmi_enable", None)
         or str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on")
     )
-    dmi_hook_selection = getattr(args, "dmi_hook_selection", None)
-    if dmi_hook_selection is None:
-        dmi_hook_selection = os.getenv("DMI_HOOK_SELECTION", "router-summary")
-    selected_dmi_hooks = parse_hook_selection(dmi_hook_selection)
-    dmi_metadata_enabled = dmi_enabled and (
-        hook_selection_requires_valid_count(selected_dmi_hooks)
-        or (bool(getattr(args, "sft", False)) and "loss-summary" in selected_dmi_hooks)
+    if dmi_enabled:
+        dmi_required_metadata_fields = getattr(
+            args,
+            "dmi_required_metadata_fields",
+            None,
+        )
+        if dmi_required_metadata_fields is None:
+            raise RuntimeError(
+                "DMI startup did not publish args.dmi_required_metadata_fields"
+            )
+        if not isinstance(dmi_required_metadata_fields, tuple) or not all(
+            isinstance(field, str) for field in dmi_required_metadata_fields
+        ):
+            raise TypeError(
+                "args.dmi_required_metadata_fields must be a tuple[str, ...]"
+            )
+    else:
+        dmi_required_metadata_fields = ()
+    dmi_valid_count_enabled = "valid_count" in dmi_required_metadata_fields
+    dmi_segment_metadata_enabled = (
+        "segment_metadata" in dmi_required_metadata_fields
+    )
+    dmi_dataset_id_enabled = "dataset_id" in dmi_required_metadata_fields
+    dmi_packed_metadata_enabled = bool(
+        dmi_valid_count_enabled or dmi_segment_metadata_enabled
     )
 
     def _broadcast(item):
@@ -705,7 +707,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         packed_segment_metadata_cpu = None
         packed_valid_count_cpu = None
         packed_dataset_id_cpu = None
-        if args.sft and dmi_metadata_enabled:
+        if args.sft and dmi_packed_metadata_enabled:
             (
                 packed_segment_metadata_cpu,
                 packed_valid_count_cpu,
@@ -737,7 +739,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
                 else data["local_cp_size"].cuda(non_blocking=True)
             ),
         }
-        if dmi_metadata_enabled:
+        if dmi_valid_count_enabled:
             dmi_valid_count_raw = (
                 packed_valid_count_cpu
                 if args.sft
@@ -746,13 +748,13 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             dmi_valid_count_cpu_raw = data.get("dmi_valid_count_cpu", dmi_valid_count_raw)
             batch['dmi_valid_count'] = dmi_valid_count_raw
             batch['dmi_valid_count_cpu'] = _cpu_dmi_valid_count(dmi_valid_count_cpu_raw)
-            if args.sft:
-                batch["dmi_segment_metadata_cpu"] = packed_segment_metadata_cpu
-                batch["dmi_segment_metadata"] = packed_segment_metadata_cpu.to(
-                    device=torch.cuda.current_device(),
-                    non_blocking=True,
-                )
-        if dmi_enabled:
+        if args.sft and dmi_segment_metadata_enabled:
+            batch["dmi_segment_metadata_cpu"] = packed_segment_metadata_cpu
+            batch["dmi_segment_metadata"] = packed_segment_metadata_cpu.to(
+                device=torch.cuda.current_device(),
+                non_blocking=True,
+            )
+        if dmi_dataset_id_enabled:
             dmi_dataset_id_raw = (
                 packed_dataset_id_cpu
                 if args.sft and packed_dataset_id_cpu is not None
@@ -794,7 +796,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast_cu_seqlens(batch['cu_seqlens'])
             _broadcast(batch['max_seqlen'])
             _broadcast(batch['local_cp_size'])
-            if dmi_metadata_enabled:
+            if dmi_valid_count_enabled:
                 if not args.sft:
                     batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
@@ -804,7 +806,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(batch['position_ids'])
             _broadcast_cu_seqlens(batch['cu_seqlens'])
             _broadcast(batch['max_seqlen'])
-            if dmi_metadata_enabled:
+            if dmi_valid_count_enabled:
                 if not args.sft:
                     batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
@@ -815,7 +817,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(batch['labels'])
             _broadcast(batch['loss_mask'])
             _broadcast(batch['attention_mask'])
-            if dmi_metadata_enabled:
+            if dmi_valid_count_enabled:
                 if not args.sft:
                     batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
@@ -898,7 +900,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             cu_seqlens = _broadcast_cu_seqlens()
             _broadcast(max_seqlen)
             _broadcast(local_cp_size)
-            if dmi_metadata_enabled:
+            if dmi_valid_count_enabled:
                 if not args.sft:
                     dmi_valid_count = _broadcast_dmi_valid_count()
 
@@ -911,7 +913,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(position_ids)
             cu_seqlens = _broadcast_cu_seqlens()
             _broadcast(max_seqlen)
-            if dmi_metadata_enabled:
+            if dmi_valid_count_enabled:
                 if not args.sft:
                     dmi_valid_count = _broadcast_dmi_valid_count()
 
@@ -927,7 +929,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(labels)
             _broadcast(loss_mask)
             _broadcast(attention_mask)
-            if dmi_metadata_enabled:
+            if dmi_valid_count_enabled:
                 if not args.sft:
                     dmi_valid_count = _broadcast_dmi_valid_count()
 
@@ -941,13 +943,13 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             'max_seqlen': max_seqlen,
             'local_cp_size': local_cp_size,
         }
-        if dmi_metadata_enabled:
+        if dmi_valid_count_enabled:
             batch['dmi_valid_count'] = dmi_valid_count
             batch['dmi_valid_count_cpu'] = None
-            if args.sft:
-                batch["dmi_segment_metadata"] = dmi_segment_metadata
-                batch["dmi_segment_metadata_cpu"] = None
-        if dmi_enabled:
+        if args.sft and dmi_segment_metadata_enabled:
+            batch["dmi_segment_metadata"] = dmi_segment_metadata
+            batch["dmi_segment_metadata_cpu"] = None
+        if dmi_dataset_id_enabled:
             batch['dmi_dataset_id_cpu'] = None
 
     return batch
