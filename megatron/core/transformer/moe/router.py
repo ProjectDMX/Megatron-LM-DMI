@@ -271,7 +271,14 @@ class TopKRouter(Router):
             largest=False,
             sorted=True,
         ).values
-        selected_weights = torch.gather(probs, dim=1, index=selected_ids)
+        # Capacity dropping can leave a token with fewer than ``topk``
+        # surviving routes. Missing routes use ``num_experts`` as a sentinel,
+        # which must not be passed to torch.gather as an index.
+        num_experts = routing_map.shape[1]
+        valid_routes = selected_ids < num_experts
+        gather_ids = selected_ids.masked_fill(~valid_routes, 0)
+        selected_weights = torch.gather(probs, dim=1, index=gather_ids)
+        selected_weights = selected_weights.masked_fill(~valid_routes, 0)
         output_shape = (int(seq_length), int(bsz), int(self.topk))
         selected_ids = selected_ids.view(output_shape).transpose(0, 1).contiguous()
         selected_weights = selected_weights.view(output_shape).transpose(0, 1).contiguous()

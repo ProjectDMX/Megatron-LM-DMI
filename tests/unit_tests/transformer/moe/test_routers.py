@@ -1,6 +1,7 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
 
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -9,7 +10,7 @@ import torch
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_submodules
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.moe_utils import get_updated_expert_bias, router_gating_linear
-from megatron.core.transformer.moe.router import Router
+from megatron.core.transformer.moe.router import Router, TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.initialize import _set_random_seed
 from tests.unit_tests.test_utilities import Utils
@@ -23,6 +24,48 @@ try:
     HAVE_ROUTER_FUSION = _fused_topk_with_score_function is not None
 except Exception:  # pragma: no cover - defensive
     HAVE_ROUTER_FUSION = False
+
+
+@pytest.mark.internal
+def test_dmi_router_topk_handles_dropped_routes():
+    """Missing post-capacity routes use sentinel IDs and zero weights."""
+    probs = torch.tensor(
+        [
+            [0.6, 0.0, 0.4, 0.0],
+            [0.0, 0.7, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    routing_map = torch.tensor(
+        [
+            [True, False, True, False],
+            [False, True, False, False],
+            [False, False, False, False],
+        ],
+        dtype=torch.bool,
+    )
+
+    expert_ids, weights = TopKRouter._dmi_router_topk_from_routing(
+        SimpleNamespace(topk=2),
+        probs,
+        routing_map,
+        seq_length=3,
+        bsz=1,
+    )
+
+    # num_experts == 4 is the sentinel for a dropped route.
+    expected_ids = torch.tensor(
+        [[[0, 2], [1, 4], [4, 4]]],
+        dtype=torch.int64,
+    )
+    expected_weights = torch.tensor(
+        [[[0.6, 0.4], [0.7, 0.0], [0.0, 0.0]]],
+        dtype=torch.float32,
+    )
+
+    assert torch.equal(expert_ids, expected_ids)
+    torch.testing.assert_close(weights, expected_weights)
 
 
 class TestTop2Router:
@@ -275,7 +318,6 @@ class TestTop2Router:
         self.router.config.moe_expert_capacity_factor = None
         self.router.config.moe_token_drop_policy = "probs"
         self.router.config.moe_pad_expert_input_to_capacity = False
-
 
 class TestGroupLimitedRouter:
     def setup_method(self, method):
