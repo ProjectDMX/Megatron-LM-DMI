@@ -3512,4 +3512,31 @@ def _add_dmi_args(parser):
         default=None,
         help='DMI emission policy across TP/EP/CP ranks.',
     )
+    group.add_argument(
+        '--dmi-recurring-d2h-windows', action='store_true', default=None,
+        help='Opt in to recurring D2H windows for non-interleaved PP>1 (default: off).',
+    )
+    group.add_argument(
+        '--dmi-d2h-window-minimum-record-probe-retry-interval-occurrences',
+        type=int, default=None,
+        help='Occurrences between disabled-window minimum-record probes (default: 4).',
+    )
+    group.add_argument(
+        '--dmi-d2h-window-timing-revalidation-retry-interval-occurrences',
+        type=int, default=None,
+        help='Base occurrences between failed timing-revalidation probes (default: 4).',
+    )
+    group.add_argument(
+        '--dmi-d2h-window-capacity-flush-fallback-threshold', type=int, default=None,
+        help='Capacity-forced flush count before terminal batching fallback (default: 3).',
+    )
+    group.add_argument(
+        '--dmi-d2h-window-capacity-flush-count-reset-interval-periods',
+        type=int, default=None,
+        help='Periods between capacity flushes that reset fallback evidence (default: 32).',
+    )
+    group.add_argument(
+        '--dmi-d2h-window-debug', action='store_true', default=None,
+        help='Log DMI window definitions and D2H decisions (default: off).',
+    )
     return parser

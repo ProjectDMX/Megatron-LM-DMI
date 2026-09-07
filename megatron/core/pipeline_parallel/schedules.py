@@ -43,13 +43,21 @@ from .hybrid_cp_schedule import hybrid_context_parallel_forward_backward
 
 try:
     from dmi_megatron_integration.schedule_runtime import (
+        dmi_advance_d2h_boundary,
         dmi_begin_iteration,
+        dmi_d2h_windows_active,
         dmi_end_iteration,
         dmi_enter_current_scope,
         dmi_guard_schedule_supported,
         dmi_set_current_event,
     )
 except Exception:
+    def dmi_advance_d2h_boundary():
+        pass
+
+    def dmi_d2h_windows_active():
+        return False
+
     def dmi_guard_schedule_supported(config, forward_only):
         del config, forward_only
 
@@ -2094,6 +2102,9 @@ def forward_backward_pipelining_without_interleaving(
     is_multimodule = isinstance(pg_collection, MultiModuleProcessGroupCollection) or isinstance(
         p2p_communicator, MultiModulePipelineCommunicator
     )
+    dmi_window_boundaries = not forward_only and dmi_d2h_windows_active()
+    if dmi_window_boundaries and is_multimodule:
+        raise NotImplementedError("DMI recurring D2H windows do not support multi-module pipelines")
 
     if p2p_communicator is None and pg_collection is None:
         # Default: single-module with parallel_state groups
@@ -2147,6 +2158,13 @@ def forward_backward_pipelining_without_interleaving(
             )
     else:
         raise ValueError("Provide both p2p_communicator and pg_collection, or neither")
+
+    dmi_forward_recv_windows = (
+        dmi_window_boundaries and not p2p_communicator.is_pp_first_stage
+    )
+    dmi_backward_recv_windows = (
+        dmi_window_boundaries and not p2p_communicator.is_pp_last_stage
+    )
 
     # Needed only when gradients are finalized in M-Core
     if config.finalize_model_grads_func is not None and not forward_only:
@@ -2248,10 +2266,15 @@ def forward_backward_pipelining_without_interleaving(
         else:
             checkpoint_activations_microbatch = None
 
+        if dmi_forward_recv_windows:
+            dmi_advance_d2h_boundary()
         input_tensor = p2p_communicator.recv_forward(
             recv_tensor_shapes, p2p_communicator.is_pp_first_stage
         )
         dmi_set_current_event("fwd", i, 0)
+        # Close at the next computation entry, not at the P2P return.
+        if dmi_forward_recv_windows:
+            dmi_advance_d2h_boundary()
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -2280,6 +2303,8 @@ def forward_backward_pipelining_without_interleaving(
     # If all microbatches are run in warmup / cooldown phase, then no need to
     # receive this tensor here.
     if num_microbatches_remaining > 0:
+        if dmi_forward_recv_windows:
+            dmi_advance_d2h_boundary()
         input_tensor = p2p_communicator.recv_forward(
             recv_tensor_shapes, p2p_communicator.is_pp_first_stage
         )
@@ -2298,6 +2323,8 @@ def forward_backward_pipelining_without_interleaving(
 
         forward_microbatch_id = i + num_warmup_microbatches
         dmi_set_current_event("fwd", forward_microbatch_id, 0)
+        if dmi_forward_recv_windows:
+            dmi_advance_d2h_boundary()
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -2324,6 +2351,8 @@ def forward_backward_pipelining_without_interleaving(
                     recv_tensor_shapes, p2p_communicator.is_pp_first_stage
                 )
         else:
+            if dmi_backward_recv_windows:
+                dmi_advance_d2h_boundary()
             output_tensor_grad = p2p_communicator.send_forward_recv_backward(
                 output_tensor, send_tensor_shapes, p2p_communicator.is_pp_last_stage
             )
@@ -2348,6 +2377,8 @@ def forward_backward_pipelining_without_interleaving(
 
             dmi_set_current_event("bwd", dmi_backward_microbatch_id, 0)
             dmi_enter_current_scope()
+            if dmi_backward_recv_windows:
+                dmi_advance_d2h_boundary()
             input_tensor_grad = backward_func(
                 input_tensor, output_tensor, output_tensor_grad, config
             )
@@ -2358,6 +2389,8 @@ def forward_backward_pipelining_without_interleaving(
                     input_tensor_grad, p2p_communicator.is_pp_first_stage
                 )
             else:
+                if dmi_forward_recv_windows:
+                    dmi_advance_d2h_boundary()
                 input_tensor = p2p_communicator.send_backward_recv_forward(
                     input_tensor_grad, recv_tensor_shapes, p2p_communicator.is_pp_first_stage
                 )
@@ -2379,12 +2412,16 @@ def forward_backward_pipelining_without_interleaving(
             output_tensor = output_tensors.pop(0)
             dmi_backward_microbatch_id = dmi_microbatch_ids.pop(0)
 
+            if dmi_backward_recv_windows:
+                dmi_advance_d2h_boundary()
             output_tensor_grad = p2p_communicator.recv_backward(
                 send_tensor_shapes, p2p_communicator.is_pp_last_stage
             )
 
             dmi_set_current_event("bwd", dmi_backward_microbatch_id, 0)
             dmi_enter_current_scope()
+            if dmi_backward_recv_windows:
+                dmi_advance_d2h_boundary()
             input_tensor_grad = backward_func(
                 input_tensor, output_tensor, output_tensor_grad, config
             )

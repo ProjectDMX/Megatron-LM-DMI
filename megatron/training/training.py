@@ -1900,6 +1900,7 @@ def _train_step_impl(
         from dmi_megatron_integration.schedule_runtime import (
             dmi_begin_attempt,
             dmi_finish_attempt,
+            dmi_prepare_d2h_windows,
         )
     save_dgrads_in_this_iteration = (args.save_dgrads_interval is not None and
                                      (iteration + 1) % args.save_dgrads_interval == 0)
@@ -1948,6 +1949,8 @@ def _train_step_impl(
         # Forward pass.
         if save_dgrads_in_this_iteration:
             enable_dgrad_logging(model, args.save)
+        if dmi_handle is not None:
+            dmi_prepare_d2h_windows(forward_backward_func, get_num_microbatches())
         losses_reduced = forward_backward_func(
             forward_step_func=forward_step_func,
             data_iterator=data_iterator,
