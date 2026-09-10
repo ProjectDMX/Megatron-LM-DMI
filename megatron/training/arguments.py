@@ -2912,6 +2912,9 @@ def _add_data_args(parser):
     group.add_argument('--no-create-attention-mask-in-dataloader', action='store_false',
                        help='If set, do not create attention_masks in dataloader.',
                        dest='create_attention_mask_in_dataloader')
+    group.add_argument('--keep-last-partial-validation-sequence', action='store_true',
+                       help='Keep and pad the last partial validation sequence instead of '
+                       'dropping it.')
     group.add_argument('--num-dataset-builder-threads', type=int, default=1,
                        help='Number of parallel threads per rank for dataset builder')
     group.add_argument('--object-storage-cache-path', type=str, default=None,

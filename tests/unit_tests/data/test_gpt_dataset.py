@@ -83,6 +83,7 @@ def test_mock_gpt_dataset():
         eod_mask_loss=True,
         drop_last_partial_validation_sequence=False,
         add_extra_token_to_sequence=False,
+        dmi_metadata_enabled=True,
         tokenizer=tokenizer,
         mid_level_dataset_surplus=0.005,
     )
