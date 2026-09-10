@@ -3462,6 +3462,15 @@ def _add_dmi_args(parser):
         help='DMI model/run identifier. Auto-generated when omitted.',
     )
     group.add_argument(
+        '--dmi-validation-dataset-map-dir',
+        type=str,
+        default=None,
+        help=(
+            'Directory where global rank zero writes '
+            '<run-id>.validation_dataset_id_map.json for multiple validation sets.'
+        ),
+    )
+    group.add_argument(
         '--dmi-db-host',
         type=str,
         default=None,

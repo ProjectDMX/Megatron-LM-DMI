@@ -3845,6 +3845,30 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
             # Build datasets.
             train_ds, valid_ds, test_ds = build_train_valid_test_datasets(build_train_valid_test_datasets_provider)
             valid_ds = [valid_ds] if not isinstance(valid_ds, list) else valid_ds
+            validation_dataset_map_dir = getattr(args, 'dmi_validation_dataset_map_dir', None)
+            if args.multiple_validation_sets and validation_dataset_map_dir is not None:
+                dmi_enabled = getattr(args, 'dmi_enable', None) or str(
+                    os.getenv('DMI_ENABLE', '')
+                ).strip().lower() in ('1', 'true', 'yes', 'on')
+                if dmi_enabled:
+                    from dmi_megatron_integration.schedule_runtime import (
+                        get_active_megatron_schedule_runtime,
+                    )
+                    from dmi_megatron_integration.validation_dataset_map import (
+                        write_validation_dataset_id_map,
+                    )
+
+                    runtime = get_active_megatron_schedule_runtime()
+                    if runtime is None or runtime.adaptor is None:
+                        raise RuntimeError(
+                            'DMI runtime is unavailable while writing validation dataset map'
+                        )
+                    write_validation_dataset_id_map(
+                        validation_dataset_map_dir,
+                        run_id=str(runtime.adaptor.model_id),
+                        validation_datasets=valid_ds,
+                        global_rank=torch.distributed.get_rank(),
+                    )
             if args.skip_train:
                 train_dataloader = None
             else:
