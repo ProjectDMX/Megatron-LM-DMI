@@ -674,6 +674,12 @@ class GPTModel(LanguageModule):
                 reshaped = hidden_states.squeeze(1).unsqueeze(0)
                 hidden_states = inference_context.last_token_logits(reshaped).unsqueeze(1)
 
+        if self.dmi_vocab_logits is not None:
+            assert runtime_gather_output is None, (
+                "DMI raw vocab-logits capture requires the fixed "
+                "GPTModel.parallel_output layout"
+            )
+
         logits, _ = self.output_layer(
             hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
         )
