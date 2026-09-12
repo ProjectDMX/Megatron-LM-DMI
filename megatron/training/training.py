@@ -2035,6 +2035,7 @@ def _train_step_impl(
         num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
     if dmi_handle is not None and update_successful:
         dmi_handle.emit_router_weights(model_state_iteration_id=int(iteration) + 1)
+        dmi_handle.emit_qk_weights(model_state_iteration_id=int(iteration) + 1)
     if dmi_handle is not None:
         dmi_finish_attempt(1)
 
@@ -2869,6 +2870,9 @@ def train(
 
     if dmi_handle is not None:
         dmi_handle.emit_initial_router_weights(
+            model_state_iteration_id=int(iteration),
+        )
+        dmi_handle.emit_initial_qk_weights(
             model_state_iteration_id=int(iteration),
         )
 

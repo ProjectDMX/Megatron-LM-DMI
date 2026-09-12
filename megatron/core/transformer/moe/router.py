@@ -277,7 +277,7 @@ class TopKRouter(Router):
         num_experts = routing_map.shape[1]
         valid_routes = selected_ids < num_experts
         gather_ids = selected_ids.masked_fill(~valid_routes, 0)
-        selected_weights = torch.gather(probs, dim=1, index=gather_ids)
+        selected_weights = torch.gather(probs.detach(), dim=1, index=gather_ids)
         selected_weights = selected_weights.masked_fill(~valid_routes, 0)
         output_shape = (int(seq_length), int(bsz), int(self.topk))
         selected_ids = selected_ids.view(output_shape).transpose(0, 1).contiguous()
