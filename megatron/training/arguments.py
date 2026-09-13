@@ -3420,6 +3420,22 @@ def _add_dmi_args(parser):
         help='DMI HookPointV1 hook selection name.',
     )
     group.add_argument(
+        '--dmi-storage-backend', choices=('auto', 'native', 'drop'), default=None,
+        help='Select existing native storage or metadata-only drop evaluation output.',
+    )
+    group.add_argument(
+        '--dmi-drop-base-folder', type=str, default=None,
+        help='Drop output root; each global rank appends to rank_XXXXX/events.jsonl.',
+    )
+    group.add_argument(
+        '--dmi-timing-enabled', action='store_true', default=None,
+        help='Record CPU arrivals and iteration boundaries relative to the first iteration start.',
+    )
+    group.add_argument(
+        '--dmi-ring-metrics-enabled', action='store_true', default=None,
+        help='Record per-iteration ring occupancy and high-water marks independently of timing.',
+    )
+    group.add_argument(
         '--dmi-flush-every-n-train-iters',
         type=int,
         default=None,
