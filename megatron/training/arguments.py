@@ -3420,6 +3420,16 @@ def _add_dmi_args(parser):
         help='DMI HookPointV1 hook selection name.',
     )
     group.add_argument(
+        '--dmi-layer-stride',
+        type=int,
+        default=1,
+        help=(
+            'Capture layer-based DMI hooks at global zero-based layers 0, K, 2*K, ...; '
+            'K must be positive. Default 1 captures every layer. '
+            'Outputs without a layer keep their existing placement.'
+        ),
+    )
+    group.add_argument(
         '--dmi-storage-backend', choices=('auto', 'native', 'drop'), default=None,
         help='Select existing native storage or metadata-only drop evaluation output.',
     )
