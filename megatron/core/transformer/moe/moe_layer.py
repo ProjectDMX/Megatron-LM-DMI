@@ -489,6 +489,8 @@ class MoELayer(BaseMoELayer):
                 dispatched_input, tokens_per_expert, permuted_probs
             )
         assert mlp_bias is None, f"mlp_bias is not supported for {type(self.token_dispatcher)}"
+        if hasattr(self, "baseline_moe_packed_weighted_output"):
+            self.baseline_moe_packed_weighted_output(expert_output)
         output = self.token_dispatcher.combine_preprocess(expert_output)
 
         return output, mlp_bias
