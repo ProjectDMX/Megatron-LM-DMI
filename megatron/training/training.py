@@ -1890,6 +1890,10 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
     # so we must gather across mp ranks
     grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
+    for model_chunk in model:
+        baseline_capture = getattr(model_chunk, "_baseline_capture_controller", None)
+        if baseline_capture is not None:
+            baseline_capture.record_grad_norm(grad_norm, iteration=iteration)
     if args.log_num_zeros_in_grad:
         num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
 

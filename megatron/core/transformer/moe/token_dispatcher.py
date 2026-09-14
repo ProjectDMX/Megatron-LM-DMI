@@ -646,6 +646,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             fused=self.config.moe_permute_fusion,
             drop_and_pad=self.drop_and_pad,
         )
+        if hasattr(self, "baseline_moe_inverse_map"):
+            self.baseline_moe_inverse_map(self.reversed_local_input_permutation_mapping)
         return permutated_local_input_tokens, permuted_probs
 
     def token_dispatch(self, permutated_local_input_tokens, permuted_probs):
