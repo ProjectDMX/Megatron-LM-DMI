@@ -306,13 +306,13 @@ class TopKRouter(Router):
         self,
         routing_map: torch.Tensor,
         valid_count: torch.Tensor,
-        seq_length: int,
-        bsz: int,
     ) -> torch.Tensor:
         from dmi_megatron_integration.hooks.megatron_router_summary import expert_token_count_from_routing_map
 
+        # DMI may slice the sequence before this preprocessor when SP is off.
+        seq_length, bsz, num_experts = routing_map.shape
         return expert_token_count_from_routing_map(
-            routing_map,
+            routing_map.reshape(seq_length * bsz, num_experts),
             valid_count,
             seq_length=seq_length,
             batch_size=bsz,
@@ -729,10 +729,8 @@ class TopKRouter(Router):
 
         if self.dmi_pre_drop_token_count is not None:
             self.dmi_pre_drop_token_count(
-                routing_map,
+                routing_map.view(seq_length, bsz, -1),
                 self.dmi_pre_drop_token_count.valid_count_fwd,
-                seq_length,
-                bsz,
             )
 
         # Apply token dropping to probs and routing_map.
@@ -748,10 +746,8 @@ class TopKRouter(Router):
 
         if self.dmi_post_drop_token_count is not None:
             self.dmi_post_drop_token_count(
-                routing_map,
+                routing_map.view(seq_length, bsz, -1),
                 self.dmi_post_drop_token_count.valid_count_fwd,
-                seq_length,
-                bsz,
             )
 
         # Apply each aux loss type and attach aux loss autograd function to probs

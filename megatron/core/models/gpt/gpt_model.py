@@ -123,6 +123,7 @@ class GPTModel(LanguageModule):
         self.disable_param_offloading = True
         self.dmi_vocab_logits = None
         self.dmi_vocab_logits_topk = None
+        self.dmi_lm_per_token_loss = None
 
         if hasattr(self.config, 'position_embedding_type'):
             self.position_embedding_type = self.config.position_embedding_type
@@ -674,9 +675,9 @@ class GPTModel(LanguageModule):
                 reshaped = hidden_states.squeeze(1).unsqueeze(0)
                 hidden_states = inference_context.last_token_logits(reshaped).unsqueeze(1)
 
-        if self.dmi_vocab_logits is not None:
+        if self.dmi_vocab_logits is not None or self.dmi_vocab_logits_topk is not None:
             assert runtime_gather_output is None, (
-                "DMI raw vocab-logits capture requires the fixed "
+                "DMI vocab-logits capture requires the fixed "
                 "GPTModel.parallel_output layout"
             )
 
@@ -718,6 +719,9 @@ class GPTModel(LanguageModule):
             return logits.transpose(0, 1).contiguous()
 
         loss = self.compute_language_model_loss(labels, logits)
+
+        if self.dmi_lm_per_token_loss is not None:
+            self.dmi_lm_per_token_loss(loss)
 
         return loss
 
