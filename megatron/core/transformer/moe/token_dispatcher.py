@@ -384,6 +384,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.num_local_experts = num_local_experts
         assert config.num_moe_experts is not None
         self.num_experts = config.num_moe_experts
+        self.dmi_moe_input = None
         assert self.num_local_experts > 0, "Expected at least one expert"
         self.local_expert_indices = local_expert_indices
         assert (
@@ -615,6 +616,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         assert probs.dim() == 2, "Expected 2D tensor for probs"
         assert routing_map.dim() == 2, "Expected 2D tensor for token2expert mask"
         assert routing_map.dtype == torch.bool, "Expected bool tensor for mask"
+        if self.dmi_moe_input is not None:
+            self.dmi_moe_input(hidden_states)
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
 
         if self.config.moe_router_padding_for_quantization:
