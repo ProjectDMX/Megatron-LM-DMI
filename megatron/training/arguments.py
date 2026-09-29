@@ -3418,6 +3418,12 @@ def _add_dmi_args(parser):
         default=None,
         help='DMI HookPointV1 hook selection name.',
     )
+    for phase in ("train", "valid", "test"):
+        group.add_argument(
+            f'--dmi-{phase}-hook-selection', type=str, default=None,
+            help=(f'Replace DMI hook selection for {phase}; omitted inherits '
+                  '--dmi-hook-selection. Use none to disable selected tensor hooks.'),
+        )
     group.add_argument(
         '--dmi-layer-stride',
         type=int,

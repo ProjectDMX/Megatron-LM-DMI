@@ -76,6 +76,7 @@ try:
         dmi_finish_cuda_graph_capture,
         dmi_finish_te_capture_session,
         dmi_force_eager_unit,
+        dmi_local_graph_evaluation_eager,
         dmi_prepare_local_backward_replay,
         dmi_prepare_local_forward_boundary,
         dmi_prepare_local_forward_replay,
@@ -84,6 +85,9 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name not in {"dmi_megatron_integration", "dmi_megatron_integration.schedule_runtime"}:
         raise
+
+    def dmi_local_graph_evaluation_eager(*, warn=False):
+        return False
 
     def dmi_begin_cuda_graph_capture(*, warmup_enabled=True, capture_direction=None):
         del warmup_enabled, capture_direction
@@ -563,6 +567,8 @@ def create_cudagraphs():
     to be created in execution order, which allows multiple cudagraphs to share a single
     memory pool, minimizing cudagraph memory usage."""
 
+    if dmi_local_graph_evaluation_eager():
+        return None
     return _CudagraphGlobalRecord.create_cudagraphs()
 
 
@@ -1680,6 +1686,10 @@ class CudaGraphManager(torch.nn.Module):
 
             kwargs (dict):  The keyword args to be passed to the module.
         """
+        if dmi_local_graph_evaluation_eager(warn=True):
+            if self.func is not None:
+                return self.func(*args, **kwargs)
+            return super(MegatronModule, megatron_module).__call__(*args, **kwargs)
         is_inference_mode = 'inference_context' in kwargs.keys() and kwargs['inference_context']
         is_in_checkpoint_fwd = is_checkpointing()
         if HAVE_TE_GRAPHS:

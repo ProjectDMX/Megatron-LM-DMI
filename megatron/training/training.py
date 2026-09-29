@@ -2006,6 +2006,12 @@ def _train_step_impl(
         unwrapped_model = unwrap_model(model[0])
         unwrapped_model.cancel_gradients_last_layer(args.curr_iteration)
 
+    # Snapshot the model weights used by this iteration, even if the update
+    # subsequently skips. This is outside forward/backward CUDA graphs.
+    if dmi_handle is not None:
+        dmi_handle.emit_router_weights(model_state_iteration_id=int(iteration) + 1)
+        dmi_handle.emit_qk_weights(model_state_iteration_id=int(iteration) + 1)
+
     # Update parameters.
 
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
@@ -2033,11 +2039,8 @@ def _train_step_impl(
     grad_norm = decode_reduced_stat(grad_norm_tensor)
     if args.log_num_zeros_in_grad:
         num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
-    if dmi_handle is not None and update_successful:
-        dmi_handle.emit_router_weights(model_state_iteration_id=int(iteration) + 1)
-        dmi_handle.emit_qk_weights(model_state_iteration_id=int(iteration) + 1)
     if dmi_handle is not None:
-        dmi_finish_attempt(1)
+        dmi_finish_attempt(1, weights_updated=bool(update_successful))
 
     # Vision momentum.
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
