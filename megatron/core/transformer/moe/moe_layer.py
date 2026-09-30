@@ -494,7 +494,13 @@ class MoELayer(BaseMoELayer):
         # this IDENTITY payload from expert_output at eager runtime; a CUDA Graph
         # plan would freeze the capture-time extent and is unsupported for this hook.
         if self.dmi_moe_packed_weighted_output is not None:
-            self.dmi_moe_packed_weighted_output(expert_output)
+            sampling = getattr(self.token_dispatcher, "dmi_source_sampling", None)
+            if sampling is not None and sampling.enabled():
+                self.dmi_moe_packed_weighted_output(
+                    expert_output, self.token_dispatcher.dmi_source_counts_gpu.T
+                )
+            elif sampling is None:
+                self.dmi_moe_packed_weighted_output(expert_output)
         output = self.token_dispatcher.combine_preprocess(expert_output)
 
         return output, mlp_bias

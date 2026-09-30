@@ -462,6 +462,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
         self.shared_experts = None
         self.dmi_moe_inverse_map = None
+        self.dmi_source_sampling = None
 
     def set_shared_experts(self, shared_experts):
         """Set shared expert to the dispatcher."""
@@ -576,13 +577,19 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             # to get the `num_tokens_per_local_expert` CPU value.
             self._maybe_update_cuda_sync_point("before_finish")
 
-        if self.num_local_experts > 1:
+        sample_sources = self.dmi_source_sampling is not None and self.dmi_source_sampling.enabled()
+        preserve_graph_outputs = getattr(self, 'dmi_preserve_source_count_graph_outputs', False)
+        if sample_sources or preserve_graph_outputs:
+            self.dmi_source_counts_gpu = num_global_tokens_per_local_expert.view(
+                -1, self.num_local_experts
+            )
+        if self.num_local_experts > 1 or sample_sources or preserve_graph_outputs:
             # [tp_size * ep_size, num_local_experts]. Represents the number of tokens sent
             # to each local expert by all ranks.
             self.num_global_tokens_per_local_expert = num_global_tokens_per_local_expert.view(
                 -1, self.num_local_experts
             )
-            if not self.config.moe_permute_fusion:
+            if self.num_local_experts > 1 and not self.config.moe_permute_fusion:
                 # A synchronization is needed before permutation 2
                 # to get the `num_global_tokens_per_local_expert` CPU value.
                 self._maybe_update_cuda_sync_point("before_permutation_2")
@@ -650,8 +657,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             fused=self.config.moe_permute_fusion,
             drop_and_pad=self.drop_and_pad,
         )
-        # DMI's first inverse-map implementation is eager-only.  Do not execute this
-        # hook under CUDA Graph capture or replay; graph support needs its own plan.
+        # DMI supports this hook for fixed-token, dropless, unpadded, unfused routing.
+        # Offload the inverse map unchanged with IDENTITY and KNOWN_BEFORE_EXECUTION:
+        # its source_tokens * topk extent stays fixed despite changing EP traffic.
         if self.dmi_moe_inverse_map is not None:
             self.dmi_moe_inverse_map(self.reversed_local_input_permutation_mapping)
         return permutated_local_input_tokens, permuted_probs
@@ -901,7 +909,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                     self.num_out_tokens = maybe_move_tensor_to_cpu(
                         self.num_out_tokens, record_stream=on_side_stream
                     )
-                    if self.num_local_experts > 1 and not self.config.moe_permute_fusion:
+                    sample_sources = self.dmi_source_sampling is not None and self.dmi_source_sampling.enabled()
+                    if (self.num_local_experts > 1 or sample_sources) and not self.config.moe_permute_fusion:
                         self.num_global_tokens_per_local_expert = maybe_move_tensor_to_cpu(
                             self.num_global_tokens_per_local_expert, record_stream=on_side_stream
                         )

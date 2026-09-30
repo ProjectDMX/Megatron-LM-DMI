@@ -3418,12 +3418,21 @@ def _add_dmi_args(parser):
         default=None,
         help='DMI HookPointV1 hook selection name.',
     )
+    group.add_argument(
+        '--dmi-hook-config', type=str, default=None,
+        help='Optional YAML with hook-scoped source_sampling configuration.',
+    )
     for phase in ("train", "valid", "test"):
         group.add_argument(
             f'--dmi-{phase}-hook-selection', type=str, default=None,
             help=(f'Replace DMI hook selection for {phase}; omitted inherits '
                   '--dmi-hook-selection. Use none to disable selected tensor hooks.'),
         )
+    group.add_argument(
+        '--dmi-layer-indices', type=int, nargs='+', default=None,
+        help='Capture only these unique zero-based global layers; requires --dmi-layer-stride 1. '
+             'Outputs without a layer retain their existing placement.',
+    )
     group.add_argument(
         '--dmi-layer-stride',
         type=int,
