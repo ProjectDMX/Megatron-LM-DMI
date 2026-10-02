@@ -259,8 +259,6 @@ class CaptureBase:
         self.pending.clear()
         if any(self._fired.values()):
             raise RuntimeError("Hook observations were not consumed")
-        if torch.cuda.is_initialized():
-            torch.cuda.current_stream().synchronize()
         self.iteration_audits.append(dict(iteration=self.iteration,
                                          t_iteration_start_ns=self.iteration_start_ns,
                                          t_flush_start_ns=flush_start_ns,

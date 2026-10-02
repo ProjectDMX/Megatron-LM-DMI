@@ -260,7 +260,9 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
                 )
                 return schedule_plan, partial(loss_func, loss_mask, model=model)
             else:
-                output_tensor = model(
+                baseline_evaluation = getattr(model, "_baseline_hidden_evaluation", None)
+                model_forward = model if baseline_evaluation is None else baseline_evaluation.forward
+                output_tensor = model_forward(
                     tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask, packed_seq_params=packed_seq_params
                 )
 
