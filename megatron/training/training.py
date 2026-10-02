@@ -32,12 +32,14 @@ def set_startup_timestamps(program_start=None, main_entry=None):
 
 
 from collections import defaultdict
+import atexit
 import copy
 import dataclasses
 from datetime import datetime, timedelta
 import functools
 import gc
 import inspect
+import json
 import logging
 import math
 import os
@@ -1016,6 +1018,8 @@ def pretrain(
         }
     else:
         checkpointing_context = {}
+
+    _assert_dmi_disabled_control(args)
 
     if getattr(args, "dmi_exact_resume", False):
         from dmi_megatron_integration.exact_resume import configure_dmi_exact_execution
@@ -2746,6 +2750,28 @@ def checkpoint_and_decide_exit(
     return False
 
 
+def _write_iteration_timings(path, records):
+    """Write rank-local CPU timings once at process exit, outside measured steps."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as output:
+        json.dump([
+            dict(iteration=iteration, t_iteration_start_ns=start_ns,
+                 t_iteration_end_ns=end_ns, duration_ns=end_ns - start_ns)
+            for iteration, start_ns, end_ns in records
+        ], output)
+        output.write("\n")
+
+
+def _assert_dmi_disabled_control(args):
+    """Fail before DMI initialization if this dedicated control was misconfigured."""
+    enabled = str(os.getenv("DMI_ENABLE", "")).strip().lower() in ("1", "true", "yes", "on")
+    if getattr(args, "dmi_enable", False) or enabled or getattr(args, "dmi_exact_resume", False):
+        raise RuntimeError("This checkout is a DMI-disabled control; DMI must remain off")
+    runtime = sys.modules.get("dmi_megatron_integration.schedule_runtime")
+    if runtime is not None and runtime.get_active_megatron_schedule_runtime() is not None:
+        raise RuntimeError("DMI runtime unexpectedly active in disabled control")
+
+
 def train(
     forward_step_func,
     model,
@@ -2763,6 +2789,21 @@ def train(
     """Training function: run train_step desired number of times, run validation, checkpoint."""
     args = get_args()
     timers = get_timers()
+
+    _assert_dmi_disabled_control(args)
+    if dmi_handle is not None:
+        raise RuntimeError("DMI handle unexpectedly present in disabled control")
+    # Match DMI/baseline host-clock semantics: zero is this rank's first step
+    # start, with no added CUDA wait or collective at either timing boundary.
+    iteration_timing_dir = os.environ.get("MEGATRON_ITERATION_TIMING_DIR")
+    iteration_timings = []  # Unbounded, CPU-only; short evaluation runs.
+    iteration_timing_origin_ns = None
+    if iteration_timing_dir:
+        iteration_timing_path = (
+            Path(iteration_timing_dir) / f"rank_{args.rank:05d}" / "iterations.json"
+        )
+        atexit.register(_write_iteration_timings, iteration_timing_path, iteration_timings)
+
 
     if args.perform_rl_step:
         assert has_rl_utils, "RL cannot run without the megatron.rl package"
@@ -3180,6 +3221,10 @@ def train(
             max_attention_logit = None
         else:
             ft_integration.on_training_step_start()
+            if iteration_timing_dir:
+                iteration_start_ns = time.perf_counter_ns()
+                if iteration_timing_origin_ns is None:
+                    iteration_timing_origin_ns = iteration_start_ns
             (
                 loss_dict,
                 skipped_iter,
@@ -3200,6 +3245,13 @@ def train(
                 iteration=iteration,
                 dmi_handle=dmi_handle,
             )
+            if iteration_timing_dir:
+                iteration_end_ns = time.perf_counter_ns()
+                iteration_timings.append((
+                    iteration + 1,
+                    iteration_start_ns - iteration_timing_origin_ns,
+                    iteration_end_ns - iteration_timing_origin_ns,
+                ))
             ft_integration.on_training_step_end()
         if should_checkpoint:
             save_checkpoint_and_time(

@@ -3430,6 +3430,14 @@ def _add_dmi_args(parser):
         ),
     )
     group.add_argument(
+        '--dmi-layer-indices', type=int, nargs='+', default=None,
+        help=(
+            'Capture layer-based DMI hooks only at these explicit global zero-based layers. '
+            'Indices must be unique and in range; requires --dmi-layer-stride 1. '
+            'Outputs without a layer keep their existing placement.'
+        ),
+    )
+    group.add_argument(
         '--dmi-storage-backend', choices=('auto', 'native', 'drop'), default=None,
         help='Select existing native storage or metadata-only drop evaluation output.',
     )

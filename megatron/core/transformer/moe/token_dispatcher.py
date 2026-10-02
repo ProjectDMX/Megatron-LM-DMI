@@ -647,8 +647,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             fused=self.config.moe_permute_fusion,
             drop_and_pad=self.drop_and_pad,
         )
-        # DMI's first inverse-map implementation is eager-only.  Do not execute this
-        # hook under CUDA Graph capture or replay; graph support needs its own plan.
+        # DMI supports this hook for fixed-token, dropless, unpadded, unfused routing.
+        # Offload the inverse map unchanged with IDENTITY and KNOWN_BEFORE_EXECUTION:
+        # its source_tokens * topk extent stays fixed despite changing EP traffic.
         if self.dmi_moe_inverse_map is not None:
             self.dmi_moe_inverse_map(self.reversed_local_input_permutation_mapping)
         return permutated_local_input_tokens, permuted_probs
