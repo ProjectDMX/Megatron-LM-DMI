@@ -74,9 +74,11 @@ class Capture(CaptureBase):
         output, recording = torchlens.record(
             self.trace_root, args, input_kwargs=kwargs, save=self._select,
             return_output=True, on_predicate_error="fail-fast")
-        # cpu_async only enqueues; do not expose incomplete CPU payloads.
-        # This wait is part of the capture cost, not an omitted sink cost.
-        torch.cuda.current_stream().synchronize()
+        # Match upstream's copy-event completion boundary. The observer waits
+        # on events recorded immediately after the selected D2H copies; joining
+        # it makes payloads and arrival timestamps ready before acceptance.
+        # Do not synchronize the whole stream: later model work may still run.
+        # With no CUDA captures the queue is empty and this returns immediately.
         self._ready_queue.join()
         if self._ready_errors:
             raise RuntimeError("CPU-ready observer failed") from self._ready_errors[0]
