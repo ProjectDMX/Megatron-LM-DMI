@@ -32,12 +32,14 @@ def set_startup_timestamps(program_start=None, main_entry=None):
 
 
 from collections import defaultdict
+import atexit
 import copy
 import dataclasses
 from datetime import datetime, timedelta
 import functools
 import gc
 import inspect
+import json
 import logging
 import math
 import os
@@ -2599,6 +2601,18 @@ def checkpoint_and_decide_exit(
     return False
 
 
+def _write_iteration_timings(path, records):
+    """Write rank-local CPU timings once at process exit, outside measured steps."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as output:
+        json.dump([
+            dict(iteration=iteration, t_iteration_start_ns=start_ns,
+                 t_iteration_end_ns=end_ns, duration_ns=end_ns - start_ns)
+            for iteration, start_ns, end_ns in records
+        ], output)
+        output.write("\n")
+
+
 def train(
     forward_step_func,
     model,
@@ -2615,6 +2629,17 @@ def train(
     """Training function: run train_step desired number of times, run validation, checkpoint."""
     args = get_args()
     timers = get_timers()
+
+    # Match DMI/baseline host-clock semantics: zero is this rank's first step
+    # start, with no added CUDA wait or collective at either timing boundary.
+    iteration_timing_dir = os.environ.get("MEGATRON_ITERATION_TIMING_DIR")
+    iteration_timings = []  # Unbounded, CPU-only; short evaluation runs.
+    iteration_timing_origin_ns = None
+    if iteration_timing_dir:
+        iteration_timing_path = (
+            Path(iteration_timing_dir) / f"rank_{args.rank:05d}" / "iterations.json"
+        )
+        atexit.register(_write_iteration_timings, iteration_timing_path, iteration_timings)
 
     if args.perform_rl_step:
         assert has_rl_utils, "RL cannot run without the megatron.rl package"
@@ -3005,6 +3030,10 @@ def train(
             max_attention_logit = None
         else:
             ft_integration.on_training_step_start()
+            if iteration_timing_dir:
+                iteration_start_ns = time.perf_counter_ns()
+                if iteration_timing_origin_ns is None:
+                    iteration_timing_origin_ns = iteration_start_ns
             (
                 loss_dict,
                 skipped_iter,
@@ -3017,6 +3046,13 @@ def train(
             ) = train_step(
                 forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func, iteration=iteration
             )
+            if iteration_timing_dir:
+                iteration_end_ns = time.perf_counter_ns()
+                iteration_timings.append((
+                    iteration + 1,
+                    iteration_start_ns - iteration_timing_origin_ns,
+                    iteration_end_ns - iteration_timing_origin_ns,
+                ))
             ft_integration.on_training_step_end()
         if should_checkpoint:
             save_checkpoint_and_time(
