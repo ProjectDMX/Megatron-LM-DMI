@@ -707,6 +707,8 @@ class TopKRouter(Router):
         if hasattr(self, "baseline_router_logits"):
             self.baseline_router_logits(logits)
         probs, routing_map = self.routing(logits, padding_mask=padding_mask)
+        if hasattr(self, "baseline_router_selection"):
+            self.baseline_router_selection(probs, routing_map, input.shape[0], input.shape[1])
 
         return probs, routing_map
 

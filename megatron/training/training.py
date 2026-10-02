@@ -1251,7 +1251,13 @@ def pretrain(
             verbose=True,
             write_to_tensorboard=not args.skip_train,
             non_loss_data_func=non_loss_data_func,
+            baseline_phase="test",
         )
+
+    for model_chunk in model:
+        baseline_evaluation = getattr(model_chunk, "_baseline_hidden_evaluation", None)
+        if baseline_evaluation is not None:
+            baseline_evaluation.close()
 
     wandb_writer = get_wandb_writer()
     if wandb_writer:
@@ -1870,6 +1876,11 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
         unwrapped_model = unwrap_model(model[0])
         unwrapped_model.cancel_gradients_last_layer(args.curr_iteration)
+
+    # Observe compute-model weights before this iteration's optimizer mutation.
+    baseline_evaluation = getattr(model[0], "_baseline_hidden_evaluation", None)
+    if baseline_evaluation is not None and hasattr(baseline_evaluation, "before_optimizer"):
+        baseline_evaluation.before_optimizer()
 
     # Update parameters.
 
@@ -3240,7 +3251,7 @@ def train(
 
     one_logger_utils.track_e2e_metrics()
 
-    if baseline_evaluation is not None:
+    if baseline_evaluation is not None and not args.do_valid and not args.do_test:
         baseline_evaluation.close()
 
     # Flush TensorBoard, WandB writers and one-logger.
@@ -3297,6 +3308,7 @@ def evaluate(
     verbose=False,
     non_loss_data_func=None,
     eval_iters=None,
+    baseline_phase="validation",
 ):
     """Evaluation."""
     args = get_args()
@@ -3341,6 +3353,8 @@ def evaluate(
     if eval_iters is None:
         eval_iters = args.eval_iters
 
+    from megatron.baseline_validation import ValidationBoundary
+    baseline_validation = ValidationBoundary(model, phase=baseline_phase)
     with torch.no_grad():
         iteration = 0
         if verbose:
@@ -3353,6 +3367,7 @@ def evaluate(
             # Don't care about timing during evaluation
             config.timers = None
             ft_integration.on_eval_step_start()
+            baseline_validation.begin(iteration, eval_num_microbatches)
             loss_dicts = forward_backward_func(
                 forward_step_func=forward_step_func,
                 data_iterator=data_iterator,
@@ -3364,6 +3379,7 @@ def evaluate(
                 forward_only=True,
                 adjust_tensor_shapes_fn=adjust_tensor_shapes_fn,
             )
+            baseline_validation.end(iteration)
             ft_integration.on_eval_step_end()
             config.timers = get_timers()
 
@@ -3419,6 +3435,7 @@ def evaluate(
                 if done:
                     rerun_state_machine.set_mode(rerun_mode)
                     print_rank_0('Exiting during evaluation, timelimit reached')
+                    baseline_validation.close()
                     return None, None, True
 
         collected_non_loss_data = None
@@ -3446,6 +3463,7 @@ def evaluate(
         total_loss_dict[key] = numerator / denominator
 
     timers('evaluate').stop()
+    baseline_validation.close(elapsed_seconds=timers('evaluate').elapsed(reset=False))
     timers.log(['evaluate'])
 
     rerun_state_machine.set_mode(rerun_mode)
@@ -3464,6 +3482,7 @@ def evaluate_and_print_results(
     verbose=False,
     write_to_tensorboard=True,
     non_loss_data_func=None,
+    baseline_phase="validation",
 ):
     """Helper function to evaluate and dump results on screen."""
     args = get_args()
@@ -3510,6 +3529,7 @@ def evaluate_and_print_results(
             verbose,
             non_loss_data_func,
             eval_iters=iterations,
+            baseline_phase=baseline_phase,
         )
         # Timelimit hit during evaluation
         if timelimit:
