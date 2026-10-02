@@ -2620,6 +2620,9 @@ def train(
     args = get_args()
     timers = get_timers()
 
+    from megatron.baseline_evaluation import setup_hidden_state_evaluation
+    baseline_evaluation = setup_hidden_state_evaluation(model, args)
+
     if args.perform_rl_step:
         assert has_rl_utils, "RL cannot run without the megatron.rl package"
 
@@ -3009,6 +3012,8 @@ def train(
             max_attention_logit = None
         else:
             ft_integration.on_training_step_start()
+            if baseline_evaluation is not None:
+                baseline_evaluation.begin_iteration(iteration)
             (
                 loss_dict,
                 skipped_iter,
@@ -3021,6 +3026,8 @@ def train(
             ) = train_step(
                 forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func, iteration=iteration
             )
+            if baseline_evaluation is not None:
+                baseline_evaluation.end_iteration(skipped_iter)
             ft_integration.on_training_step_end()
         if should_checkpoint:
             save_checkpoint_and_time(
@@ -3233,6 +3240,9 @@ def train(
 
     one_logger_utils.track_e2e_metrics()
 
+    if baseline_evaluation is not None:
+        baseline_evaluation.close()
+
     # Flush TensorBoard, WandB writers and one-logger.
     writer = get_tensorboard_writer()
     if writer:
@@ -3240,7 +3250,17 @@ def train(
 
     # Close out pre-hooks if using distributed optimizer and overlapped param gather.
     if pre_hook_enabled:
-        disable_forward_pre_hook(model)
+        # Capture-only benchmarks discard final weights. Do not launch an unused
+        # final all-gather before the shutdown barrier: ranks can reach this
+        # point at different times after writing their per-rank metadata.
+        # Keep final parameter synchronization for saving/evaluation and normal runs.
+        discard_final_weights = (
+            baseline_evaluation is not None
+            and not args.save
+            and args.eval_iters == 0
+            and not args.perform_rl_step
+        )
+        disable_forward_pre_hook(model, param_sync=not discard_final_weights)
 
     ft_integration.on_checkpointing_start()
     # This will finalize all unfinalized async request and terminate

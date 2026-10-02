@@ -375,12 +375,12 @@ class DistributedDataParallel(_BaseDataParallel):
         Skip synchronous param all-gather if `param_sync` is False.
         """
         assert self.use_forward_hook
-        # De-register forward pre-hook for all sub-modules.
-        for module in self.module.modules():
-            assert self.remove_forward_pre_hook_handles[module] is not None
-            self.remove_forward_pre_hook_handles[module].remove()
-            del self.remove_forward_pre_hook_handles[module]
-        assert len(self.remove_forward_pre_hook_handles) == 0
+        # Remove only hooks DDP registered. Observation modules can be added
+        # after registration, so the current module tree may differ from it.
+        for handle in self.remove_forward_pre_hook_handles.values():
+            assert handle is not None
+            handle.remove()
+        self.remove_forward_pre_hook_handles.clear()
 
         # Force synchronize parameters.
         if param_sync:

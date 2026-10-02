@@ -1969,7 +1969,6 @@ def _add_network_size_args(parser):
         "pipeline_dtype",
         "variable_seq_lengths",
         "batch_p2p_comm",
-        "batch_p2p_sync",
         "deallocate_pipeline_outputs",
         "cpu_offloading",
         "cpu_offloading_activations",
