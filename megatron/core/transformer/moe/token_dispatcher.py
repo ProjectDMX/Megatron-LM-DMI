@@ -574,7 +574,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             # to get the `num_tokens_per_local_expert` CPU value.
             self._maybe_update_cuda_sync_point("before_finish")
 
-        if self.num_local_experts > 1:
+        baseline_counts = getattr(self, "baseline_source_counts_enabled", None)
+        baseline_counts = baseline_counts is not None and baseline_counts.enabled
+        if self.num_local_experts > 1 or baseline_counts:
             # [tp_size * ep_size, num_local_experts]. Represents the number of tokens sent
             # to each local expert by all ranks.
             self.num_global_tokens_per_local_expert = num_global_tokens_per_local_expert.view(
@@ -895,7 +897,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                     self.num_out_tokens = maybe_move_tensor_to_cpu(
                         self.num_out_tokens, record_stream=on_side_stream
                     )
-                    if self.num_local_experts > 1 and not self.config.moe_permute_fusion:
+                    if (self.num_local_experts > 1 or (
+                        getattr(self, "baseline_source_counts_enabled", None) is not None
+                        and self.baseline_source_counts_enabled.enabled)) and not self.config.moe_permute_fusion:
                         self.num_global_tokens_per_local_expert = maybe_move_tensor_to_cpu(
                             self.num_global_tokens_per_local_expert, record_stream=on_side_stream
                         )
