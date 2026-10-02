@@ -115,9 +115,9 @@ def setup_hidden_state_evaluation(model, args):
     if not output:
         return None
     if (len(model) != 1 or args.use_legacy_models or args.perform_rl_step or args.skip_train
-            or args.eval_iters != 0 or args.cuda_graph_impl != 'none'
+            or args.cuda_graph_impl != 'none'
             or args.virtual_pipeline_model_parallel_size is not None
-            or args.context_parallel_size != 1 or not args.sequence_parallel
+            or args.context_parallel_size != 1
             or not args.bf16 or args.recompute_granularity is not None
             or args.overlap_moe_expert_parallel_comm):
         raise ValueError('Capture requires the frozen non-interleaved BF16 setup without CUDA graphs')
@@ -126,4 +126,6 @@ def setup_hidden_state_evaluation(model, args):
         from .baseline_workload_evaluation import WorkloadEvaluation
         return WorkloadEvaluation(model[0], args, output,
                                   os.environ.get('BASELINE_CAPTURE_MODE', 'immediate'), workload)
+    if args.eval_iters != 0:
+        raise ValueError('Use a phase-aware workload for validation capture')
     return HiddenStateEvaluation(model[0], args, output, os.environ.get('BASELINE_CAPTURE_MODE', 'immediate'))

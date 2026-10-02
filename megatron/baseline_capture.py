@@ -17,15 +17,17 @@ from .baseline_sites import CaptureBase, HOOKS
 
 
 class Capture(CaptureBase):
-    def __init__(self, model, selected=HOOKS, mode="cache_async", *, vocab_topk=256):
+    def __init__(self, model, selected=HOOKS, mode="cache_async", *, vocab_topk=256, source_sampling=None):
         if mode != "cache_async":
             raise ValueError(f"This checkout requires mode='cache_async', got {mode!r}")
         if version("nnsight") != "0.7.0":
             raise RuntimeError("This baseline is validated for NNsight 0.7.0's native nonblocking cache")
-        super().__init__(model, selected, mode, vocab_topk=vocab_topk)
+        super().__init__(model, selected, mode, vocab_topk=vocab_topk, source_sampling=source_sampling)
         self.traced = NNsight(model)
+        self.weight_traced = NNsight(self.weight_model) if self.weight_model is not None else None
+        self.active_points = self.activation_points
         self.envoys = []
-        for path, _ in self.points:
+        for path, _ in self.activation_points:
             envoy = self.traced
             for part in path.split("."):
                 envoy = getattr(envoy, part)
@@ -164,7 +166,7 @@ class Capture(CaptureBase):
 
     def _install_ready_observers(self, cache):
         self._active_cache = cache
-        for (_, point), envoy in zip(self.points, self.envoys, strict=True):
+        for (_, point), envoy in zip(self.active_points, self.envoys, strict=True):
             def after_cache(module, args, output, *, path=envoy.path):
                 # Native cache hook ran immediately before this observer. Read
                 # only tensor metadata here, never the pending CPU payload.
@@ -242,7 +244,7 @@ class Capture(CaptureBase):
             residual = sum(len(set(point._forward_hooks) - ids) for point, ids in baseline)
             missing = sum(len(ids - set(point._forward_hooks)) for point, ids in baseline)
             self._trace_rows.append(dict(
-                microbatch=self.microbatch, native_hooks_removed=native_count,
+                microbatch=self.microbatch, expected_records=len(self.active_points), native_hooks_removed=native_count,
                 observer_hooks_removed=observer_count, residual_hooks=residual,
                 missing_preexisting_hooks=missing,
                 native_cache_calls=self._native_calls - calls_before,
@@ -253,10 +255,10 @@ class Capture(CaptureBase):
                 raise RuntimeError("Native trace cleanup did not restore observation hooks")
         self._trace_cache_bytes = 0
 
-    def forward(self, *args, **kwargs):
+    def _native_forward(self, *args, **kwargs):
         if self._ready_errors:
             raise RuntimeError("CPU-ready observer failed") from self._ready_errors[0]
-        self._trace_baseline = ([(point, set(point._forward_hooks)) for _, point in self.points],
+        self._trace_baseline = ([(point, set(point._forward_hooks)) for _, point in self.active_points],
                                 self._native_calls, self._queued_records)
         try:
             try:
@@ -289,10 +291,10 @@ class Capture(CaptureBase):
             completion_policy="copy events; drain at optimizer-iteration end",
             pending_cpu_bytes_after=self._pending_bytes)
         # Queries and file I/O happen AFTER CaptureBase records t_capture_end_ns.
-        expected = len(self.points) * len(self._trace_rows)
+        expected = sum(row["expected_records"] for row in self._trace_rows)
         valid = (self._native_calls == self._native_successes == self._queued_records
                  == self._completed_records == expected and self._pending_bytes == 0
-                 and all(row["native_cache_calls"] == row["observed_copies"] == len(self.points)
+                 and all(row["native_cache_calls"] == row["observed_copies"] == row["expected_records"]
                          for row in self._trace_rows))
         self.iteration_audits[-1]["async_diagnostics"] = self._append_diagnostics(
             "iteration_end", expected_native_cache_calls=expected, valid=valid,
@@ -311,3 +313,24 @@ class Capture(CaptureBase):
         super().close()
         if self._ready_errors:
             raise RuntimeError("CPU-ready observer failed") from self._ready_errors[0]
+
+    def forward(self, *args, **kwargs):
+        if not self.activation_points:
+            return self.model(*args, **kwargs)
+        return self._native_forward(*args, **kwargs)
+
+    def capture_weights(self):
+        if not self.weight_points:
+            return
+        old = self.traced, self.envoys, self.active_points, self.microbatch
+        self.traced, self.active_points, self.microbatch = self.weight_traced, self.weight_points, -1
+        self.envoys = []
+        for path, _ in self.weight_points:
+            envoy = self.weight_traced
+            for part in path.split('.'):
+                envoy = getattr(envoy, part)
+            self.envoys.append(envoy)
+        try:
+            self._native_forward(__import__('torch').empty(0))
+        finally:
+            self.traced, self.envoys, self.active_points, self.microbatch = old

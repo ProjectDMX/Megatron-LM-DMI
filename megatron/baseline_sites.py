@@ -11,10 +11,18 @@ import torch
 HOOKS = ("hidden_states", "router_logits", "moe_inverse_map",
          "moe_packed_weighted_output", "resid_final", "vocab_logits")
 ORDER = {name: index for index, name in enumerate(HOOKS)}
-FEATURES = ("vocab_topk", "loss_summary", "grad_norm")
+FEATURES = ("vocab_topk", "loss_summary", "grad_norm", "qk_weights",
+            "selected_expert_ids", "routing_weights")
+WEIGHT_HOOKS = ("query_projection_weight", "key_projection_weight")
 PREPARED_HOOKS = ("vocab_topk_values", "vocab_topk_indices",
-                  "lm_per_sample_loss", "lm_per_sample_loss_token_count")
-ORDER.update({name: len(ORDER) + i for i, name in enumerate(PREPARED_HOOKS)})
+                  "lm_per_sample_loss", "lm_per_sample_loss_token_count",
+                  "selected_expert_ids", "routing_weights", *WEIGHT_HOOKS)
+# Native synchronous traces request sites in their actual execution order.
+ORDER = {name: i for i, name in enumerate((
+    "hidden_states", "router_logits", "selected_expert_ids", "routing_weights",
+    "moe_inverse_map", "moe_packed_weighted_output", "resid_final", "vocab_logits",
+    "vocab_topk_values", "vocab_topk_indices", "lm_per_sample_loss",
+    "lm_per_sample_loss_token_count", *WEIGHT_HOOKS))}
 
 
 def parallel_coordinates():
@@ -30,6 +38,7 @@ def parallel_coordinates():
 class Observation(torch.nn.Module):
     def __init__(self, name, layer):
         super().__init__()
+        self.enabled = True
         self.name = name
         self.layer = layer
 
@@ -55,6 +64,8 @@ class VocabTopK(torch.nn.Module):
                 sample_axis=0, token_axis=1, index_scope="tp_local", topk=self.k)
 
     def forward(self, logits):
+        if not getattr(self, "enabled", True):
+            return
         if logits.ndim != 3 or logits.shape[-1] != self.local_vocab_size:
             raise ValueError("vocab_topk requires [S,B,V_local] ungathered logits")
         values, indices = torch.topk(logits.detach(), self.k, dim=-1, largest=True, sorted=True)
@@ -72,6 +83,8 @@ class SampleLoss(torch.nn.Module):
             point.extra_metadata = dict(sample_axis=0)
 
     def forward(self, token_loss, loss_mask):
+        if not getattr(self, "enabled", True):
+            return
         if not isinstance(token_loss, torch.Tensor) or token_loss.ndim != 2:
             raise ValueError("loss_summary requires dense [B,S] token losses")
         if loss_mask is None:
@@ -85,7 +98,7 @@ class SampleLoss(torch.nn.Module):
         self.count(count.to(torch.int64)[:, None])
 
 
-def install_sites(model, selected, *, vocab_topk=256):
+def install_sites(model, selected, *, vocab_topk=256, source_sampling=None, context=None):
     selected = set(selected)
     unknown = selected.difference((*HOOKS, *FEATURES))
     if unknown:
@@ -106,9 +119,16 @@ def install_sites(model, selected, *, vocab_topk=256):
             add(module, "hidden_states", int(module.layer_number) - 1)
         elif cls == "TopKRouter":
             add(module, "router_logits", int(module.layer_number) - 1)
+            if selected.intersection({"selected_expert_ids", "routing_weights"}):
+                module.add_module("baseline_router_selection", RouterSelection(
+                    int(module.layer_number)-1, module.topk, selected))
         elif cls == "MoELayer":
             layer = int(module.layer_number) - 1
-            add(module, "moe_packed_weighted_output", layer)
+            if "moe_packed_weighted_output" in selected:
+                if type(module.token_dispatcher).__name__ != "MoEAlltoAllTokenDispatcher":
+                    raise NotImplementedError("EP outputs require alltoall dispatcher")
+                module.add_module("baseline_moe_packed_weighted_output", ExpertOutput(
+                    layer, module.token_dispatcher, source_sampling, context))
             point = add(module, "moe_inverse_map", layer)
             if point is not None:
                 if type(module.token_dispatcher).__name__ != "MoEAlltoAllTokenDispatcher":
@@ -132,7 +152,7 @@ def install_sites(model, selected, *, vocab_topk=256):
                                           ORDER[p[1].name]))
 
 class CaptureBase:
-    def __init__(self, model, selected=HOOKS, mode=None, *, vocab_topk=256):
+    def __init__(self, model, selected=HOOKS, mode=None, *, vocab_topk=256, source_sampling=None):
         # TE modules are supported; TE/Megatron CUDA-graph replay is not.
         # Reject graph mode before attaching sites instead of silently missing
         # observations when Python hooks are bypassed on replay.
@@ -155,7 +175,15 @@ class CaptureBase:
             if hasattr(model, "_baseline_capture_controller"):
                 raise RuntimeError("A baseline capture is already attached to this model")
             model._baseline_capture_controller = self
-        self.points = install_sites(model, selected, vocab_topk=vocab_topk)
+        self.phase = "train"
+        self.pass_id = 0
+        self.weight_model = (WeightObservations(model, self.coordinates, selected)
+                             if "qk_weights" in self.selected else None)
+        self.activation_points = install_sites(model, selected, vocab_topk=vocab_topk,
+                                              source_sampling=source_sampling, context=self)
+        self.weight_points = ([(p, m) for p, m in self.weight_model.named_modules()
+                               if isinstance(m, Observation)] if self.weight_model else [])
+        self.points = self.activation_points + self.weight_points
         self.by_path = dict(self.points)
         self.records = []
         self.pending = []
@@ -191,6 +219,8 @@ class CaptureBase:
 
     def _hook_fire(self, point, args):
         # Same host observation boundary for every backend; before copy work.
+        if not point.enabled:
+            return
         fired_ns = self.now_ns()
         self._fired[point].append(dict(self.metadata(point, args[0]),
                                        t_hook_fire_ns=fired_ns))
@@ -199,11 +229,28 @@ class CaptureBase:
         key = (self.microbatch, point.name, point.layer)
         occurrence = self.occurrences[key]
         self.occurrences[key] += 1
-        return dict(iteration=self.iteration, microbatch=self.microbatch,
+        return dict(iteration=self.iteration, phase=self.phase, pass_id=self.pass_id, microbatch=self.microbatch,
                     hook=point.name, layer=point.layer, occurrence=occurrence,
                     shape=list(tensor.shape), dtype=str(tensor.dtype),
                     bytes=tensor.numel() * tensor.element_size(),
                     **dict(self.coordinates, **getattr(point, "extra_metadata", {})))
+
+    def set_enabled(self, enabled):
+        for _, point in self.points:
+            point.enabled = enabled
+        for module in self.model.modules():
+            if isinstance(module, (RouterSelection, ExpertOutput, VocabTopK, SampleLoss)):
+                module.enabled = enabled
+
+    def capture_weights(self):
+        if self.weight_model is None:
+            return
+        previous = self.microbatch
+        self.microbatch = -1
+        try:
+            self.weight_model(torch.empty(0))
+        finally:
+            self.microbatch = previous
 
     def record_grad_norm(self, value, *, iteration):
         """Observe the already CPU-ready reduced optimizer statistic; no new reduction."""
@@ -277,15 +324,123 @@ class CaptureBase:
 
 class ReferenceCapture(CaptureBase):
     """Untimed source-value oracle; deliberately not an evaluated baseline."""
-    def __init__(self, model, selected=HOOKS, mode=None, *, vocab_topk=256):
-        super().__init__(model, selected, mode, vocab_topk=vocab_topk)
+    def __init__(self, model, selected=HOOKS, mode=None, *, vocab_topk=256, source_sampling=None):
+        super().__init__(model, selected, mode, vocab_topk=vocab_topk, source_sampling=source_sampling)
         for _, point in self.points:
             self.handles.append(point.register_forward_hook(self._copy))
 
     def _copy(self, module, args, output):
+        if not module.enabled:
+            return
         payload = args[0].detach().cpu()
         arrived_ns = self.now_ns()
         self.accept(module, payload.clone(), t_arrive_ns=arrived_ns)
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
+
+class RouterSelection(torch.nn.Module):
+    """Observe the routes actually chosen, including any dropped-route sentinel."""
+    def __init__(self, layer, topk, selected):
+        super().__init__()
+        self.enabled = True
+        self.topk = topk
+        if 'selected_expert_ids' in selected:
+            self.ids = Observation('selected_expert_ids', layer)
+        if 'routing_weights' in selected:
+            self.weights = Observation('routing_weights', layer)
+
+    def forward(self, probs, routing_map, sequence, batch):
+        if not self.enabled:
+            return
+        experts = routing_map.shape[-1]
+        ids = torch.arange(experts, device=routing_map.device, dtype=torch.int64)[None, :]
+        chosen = torch.topk(torch.where(routing_map, ids, experts), self.topk,
+                            dim=-1, largest=False, sorted=True).values
+        valid = chosen < experts
+        if hasattr(self, 'ids'):
+            self.ids(chosen.view(sequence, batch, self.topk).transpose(0, 1).contiguous())
+        if hasattr(self, 'weights'):
+            weights = probs.detach().gather(1, chosen.masked_fill(~valid, 0)).masked_fill(~valid, 0)
+            self.weights(weights.view(sequence, batch, self.topk).transpose(0, 1).contiguous())
+
+
+class ExpertOutput(torch.nn.Module):
+    """Use synchronized dispatch counts to prepare only selected GPU rows."""
+    def __init__(self, layer, dispatcher, policy, context):
+        super().__init__()
+        self.enabled = True
+        self.dispatcher, self.policy, self.context = dispatcher, policy, context
+        self.payload = Observation('moe_packed_weighted_output', layer)
+        self.selection_count = None
+        self.global_batch_id = None
+        self.selection = None
+        dispatcher.baseline_source_counts_enabled = self
+
+    def forward(self, tensor):
+        if not self.enabled:
+            return
+        d = self.dispatcher
+        counts = d.num_global_tokens_per_local_expert
+        if counts.device.type != 'cpu':
+            raise RuntimeError('EP counts must use the existing synchronized metadata D2H')
+        counts = counts.reshape(d.tp_size * d.ep_size, d.num_local_experts)
+        batch_id = self.context.iteration + 1
+        if self.global_batch_id != batch_id:
+            self.selection = (self.policy.select(batch_id, counts.shape[0]) if self.policy
+                              else tuple(range(counts.shape[0])))
+            if self.selection_count is not None and len(self.selection) != self.selection_count:
+                raise ValueError('Source selector must return a fixed number of units')
+            self.selection_count = len(self.selection)
+            self.global_batch_id = batch_id
+        self.payload.extra_metadata = dict(
+            source_sampling=self.policy.to_dict() if self.policy else None,
+            selected_sources=list(self.selection), source_counts=counts.tolist(),
+            local_expert_indices=list(d.local_expert_indices),
+            expert_tp_size=d.tp_size, ep_size=d.ep_size,
+            expert_tp_rank=d.tp_rank,
+            source_group_ranks=(torch.distributed.get_process_group_ranks(d.tp_ep_group)
+                                if torch.distributed.is_initialized() else [0]))
+        if self.policy:
+            pieces, offset = [], 0
+            for block in counts.T.tolist():
+                for source, length in enumerate(block):
+                    if source in self.selection:
+                        pieces.append(tensor[offset:offset + length])
+                    offset += length
+            if offset != tensor.shape[0]:
+                raise RuntimeError('EP dispatch counts do not cover the output rows')
+            tensor = torch.cat(pieces, dim=0) if pieces else tensor[:0]
+        self.payload(tensor)
+
+
+class WeightObservations(torch.nn.Module):
+    """A native tracing root for pre-update observations, not a model forward."""
+    def __init__(self, model, coordinates, selected):
+        super().__init__()
+        from types import SimpleNamespace
+        from .baseline_weights import discover_weight_captures, assign_weight_fragments
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        rank_ctx = SimpleNamespace(tp_rank=coordinates['tp_rank'],
+                                   tp_world_size=coordinates['tp_size'], global_rank=rank)
+        captures = discover_weight_captures(model, rank_ctx, {'q-weights','k-weights'})
+        reports = [c.report() for c in captures]
+        if torch.distributed.is_initialized():
+            gathered = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(gathered, reports)
+            reports = [r for rows in gathered for r in rows]
+        self.layouts = assign_weight_fragments(reports)
+        lookup = {(r['layer_no'], r['act_name'], r['producer_rank']): r for r in self.layouts}
+        self.captures = captures
+        for index, capture in enumerate(captures):
+            layout = lookup[capture.layer_no, capture.act_name, rank]
+            capture.assigned = layout['fragments']
+            point = Observation(capture.act_name, capture.layer_no)
+            point.extra_metadata = dict(weight_layout=layout)
+            self.add_module(f'weight_{index}', point)
+
+    def forward(self, anchor):
+        with torch.no_grad():
+            for index, capture in enumerate(self.captures):
+                getattr(self, f'weight_{index}')(capture.pack())
+        return anchor
