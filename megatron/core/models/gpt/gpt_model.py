@@ -680,6 +680,10 @@ class GPTModel(LanguageModule):
 
         # Apply MuP output scaling to logits
         logits = self._scale_logits(logits)
+        if hasattr(self, "baseline_vocab_logits"):
+            self.baseline_vocab_logits(logits)
+        if hasattr(self, "baseline_vocab_topk"):
+            self.baseline_vocab_topk(logits)
 
         # Restore sequence parallel execution to the output layer if necessary.
         if sequence_parallel_override:
@@ -707,6 +711,8 @@ class GPTModel(LanguageModule):
             return logits.transpose(0, 1).contiguous()
 
         loss = self.compute_language_model_loss(labels, logits)
+        if hasattr(self, "baseline_loss_summary"):
+            self.baseline_loss_summary(loss, loss_mask)
 
         return loss
 

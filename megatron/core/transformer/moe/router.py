@@ -704,6 +704,8 @@ class TopKRouter(Router):
                 logits, self.config.moe_router_force_biased, self.layer_number
             )
 
+        if hasattr(self, "baseline_router_logits"):
+            self.baseline_router_logits(logits)
         probs, routing_map = self.routing(logits, padding_mask=padding_mask)
 
         return probs, routing_map
