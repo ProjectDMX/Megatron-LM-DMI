@@ -3531,6 +3531,15 @@ def evaluate(
     if eval_iters is None:
         eval_iters = args.eval_iters
 
+    dmi_timing_enabled = getattr(args, "dmi_enable", None) or str(
+        os.getenv("DMI_ENABLE", "")
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if dmi_timing_enabled:
+        from dmi_megatron_integration.schedule_runtime import (
+            dmi_begin_evaluation_iteration,
+            dmi_finish_evaluation_iteration,
+        )
+
     with torch.no_grad():
         iteration = 0
         if verbose:
@@ -3540,7 +3549,10 @@ def evaluate(
             if verbose:
                 print_rank_0(f'Evaluating iter {iteration}/{eval_iters}')
 
-            # Don't care about timing during evaluation
+            if dmi_timing_enabled:
+                dmi_begin_evaluation_iteration()
+
+            # Disable internal schedule timers; retain the outer batch measurement.
             config.timers = None
             ft_integration.on_eval_step_start()
             loss_dicts = forward_backward_func(
@@ -3598,6 +3610,9 @@ def evaluate(
                         raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
 
             args.consumed_valid_samples += eval_batch_size
+
+            if dmi_timing_enabled:
+                dmi_finish_evaluation_iteration()
 
             if args.exit_duration_in_mins:
                 train_time = (time.time() - _TRAIN_START_TIME) / 60.0
