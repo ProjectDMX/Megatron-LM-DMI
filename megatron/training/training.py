@@ -1162,6 +1162,10 @@ def pretrain(
         # Add job name to the wandb config to make it easier to run more singleton dependency jobs.
         wandb_writer.config.update({'slurm_job_name': os.getenv("SLURM_JOB_NAME", "N/A")})
 
+    # Initialize capture for training and validation-only execution alike.
+    from megatron.baseline_evaluation import setup_hidden_state_evaluation
+    baseline_evaluation = setup_hidden_state_evaluation(model, args)
+
     if not args.skip_train or args.perform_rl_step:
         if args.skip_train:
             print_rank_0('RL inference-only mode (--skip-train --perform-rl-step) ...')
@@ -2631,8 +2635,7 @@ def train(
     args = get_args()
     timers = get_timers()
 
-    from megatron.baseline_evaluation import setup_hidden_state_evaluation
-    baseline_evaluation = setup_hidden_state_evaluation(model, args)
+    baseline_evaluation = getattr(model[0], "_baseline_hidden_evaluation", None)
 
     if args.perform_rl_step:
         assert has_rl_utils, "RL cannot run without the megatron.rl package"
