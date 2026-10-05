@@ -55,9 +55,13 @@ try:
     from dmi_megatron_integration.hooks.selection import parse_hook_selection
     from dmi_megatron_integration.schedule_runtime import (
         dmi_enter_current_scope,
+        dmi_current_phase,
         dmi_record_current_microbatch_metadata,
     )
 except Exception:
+    def dmi_current_phase(default="train"):
+        return default
+
     def parse_hook_selection(selection, *, default="router-summary"):
         selected = {part.strip() for part in str(selection if selection is not None else default).split(",")}
         if "" in selected:
@@ -104,6 +108,10 @@ def _dmi_selected_hooks(args) -> set[str]:
     selection = getattr(args, "dmi_hook_selection", None)
     if selection is None:
         selection = os.getenv("DMI_HOOK_SELECTION", "router-summary")
+    phase = dmi_current_phase(default="train")
+    override = getattr(args, f"dmi_{phase}_hook_selection", None)
+    if override is not None:
+        selection = override
     return parse_hook_selection(selection)
 
 
