@@ -113,15 +113,21 @@ class HiddenStateEvaluation:
 def setup_hidden_state_evaluation(model, args):
     output = os.environ.get('BASELINE_HIDDEN_METRICS_DIR')
     if not output:
+        if os.environ.get('BASELINE_EVAL_WORKLOAD'):
+            raise ValueError('Requested baseline workload requires BASELINE_HIDDEN_METRICS_DIR')
         return None
-    if (len(model) != 1 or args.use_legacy_models or args.perform_rl_step or args.skip_train
+    workload = os.environ.get('BASELINE_EVAL_WORKLOAD', 'hidden_states')
+    if args.skip_train and workload != 'validation_quality':
+        raise ValueError('--skip-train capture requires the validation_quality workload')
+    if workload == 'validation_quality' and (args.eval_iters <= 0 or not args.do_valid):
+        raise ValueError('validation_quality capture requires an enabled validation pass')
+    if (len(model) != 1 or args.use_legacy_models or args.perform_rl_step
             or args.cuda_graph_impl != 'none'
             or args.virtual_pipeline_model_parallel_size is not None
             or args.context_parallel_size != 1
             or not args.bf16 or args.recompute_granularity is not None
             or args.overlap_moe_expert_parallel_comm):
         raise ValueError('Capture requires the frozen non-interleaved BF16 setup without CUDA graphs')
-    workload = os.environ.get('BASELINE_EVAL_WORKLOAD', 'hidden_states')
     if workload != 'hidden_states':
         from .baseline_workload_evaluation import WorkloadEvaluation
         return WorkloadEvaluation(model[0], args, output,
