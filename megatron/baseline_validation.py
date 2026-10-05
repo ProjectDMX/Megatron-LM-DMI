@@ -9,6 +9,9 @@ class ValidationBoundary:
     def __init__(self, model, *, phase="validation"):
         self.phase = phase
         self.evaluation = getattr(model[0], '_baseline_hidden_evaluation', None)
+        if self.evaluation is None and (os.environ.get('BASELINE_HIDDEN_METRICS_DIR')
+                                        or os.environ.get('BASELINE_EVAL_WORKLOAD')):
+            raise RuntimeError('Baseline capture was requested but not initialized before evaluation')
         self.output = os.environ.get('BASELINE_VALIDATION_METRICS_DIR')
         self.pass_id = getattr(model[0], '_baseline_validation_pass_id', 0) + 1
         model[0]._baseline_validation_pass_id = self.pass_id
