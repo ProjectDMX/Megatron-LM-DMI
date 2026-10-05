@@ -583,19 +583,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
     def _tp_world_size_is_one():
         return mpu.get_tensor_model_parallel_world_size() == 1
 
-    def _local_dmi_valid_count(valid_count=None):
-        if valid_count is None:
-            return None
-        if not isinstance(valid_count, torch.Tensor):
-            valid_count = torch.as_tensor(valid_count, dtype=torch.int64)
-        if valid_count.is_cuda:
-            return valid_count.to(dtype=torch.int64).view(-1).contiguous()
-        return valid_count.to(
-            device=torch.cuda.current_device(),
-            dtype=torch.int64,
-            non_blocking=True,
-        ).view(-1).contiguous()
-
     def _cpu_dmi_valid_count(valid_count=None):
         if valid_count is None:
             return None
@@ -604,30 +591,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         if valid_count.is_cuda:
             raise RuntimeError("DMI CPU valid_count metadata must not be recovered from CUDA")
         return valid_count.to(device="cpu", dtype=torch.int64).view(-1).contiguous()
-
-    def _broadcast_dmi_valid_count(valid_count=None):
-        if _tp_world_size_is_one():
-            return _local_dmi_valid_count(valid_count)
-        dev = torch.cuda.current_device()
-        has_valid_count = torch.tensor(
-            0 if valid_count is None else 1,
-            dtype=torch.int64,
-            device=dev,
-        )
-        _broadcast(has_valid_count)
-        if int(has_valid_count.item()) == 0:
-            return None
-
-        if valid_count is None:
-            valid_count = torch.empty(args.micro_batch_size, dtype=torch.int64, device=dev)
-        else:
-            valid_count = valid_count.to(
-                device=dev,
-                dtype=torch.int64,
-                non_blocking=True,
-            ).view(-1).contiguous()
-        _broadcast(valid_count)
-        return valid_count
 
     def _compile_packed_dmi_metadata(data):
         row_metadata = data.get("dmi_segment_metadata")
@@ -746,6 +709,8 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
                 else data.get("dmi_valid_count", None)
             )
             dmi_valid_count_cpu_raw = data.get("dmi_valid_count_cpu", dmi_valid_count_raw)
+            # The DMI metadata context propagates CPU counts across TP/PP and
+            # uploads the prepared counts. Do not also broadcast them on CUDA.
             batch['dmi_valid_count'] = dmi_valid_count_raw
             batch['dmi_valid_count_cpu'] = _cpu_dmi_valid_count(dmi_valid_count_cpu_raw)
         if args.sft and dmi_segment_metadata_enabled:
@@ -796,9 +761,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast_cu_seqlens(batch['cu_seqlens'])
             _broadcast(batch['max_seqlen'])
             _broadcast(batch['local_cp_size'])
-            if dmi_valid_count_enabled:
-                if not args.sft:
-                    batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
         elif mpu.is_pipeline_first_stage():
             _broadcast(batch['tokens'])
@@ -806,9 +768,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(batch['position_ids'])
             _broadcast_cu_seqlens(batch['cu_seqlens'])
             _broadcast(batch['max_seqlen'])
-            if dmi_valid_count_enabled:
-                if not args.sft:
-                    batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
         elif mpu.is_pipeline_last_stage():
             # Multi-Token Prediction (MTP) layers need tokens and position_ids to calculate embedding.
@@ -817,9 +776,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(batch['labels'])
             _broadcast(batch['loss_mask'])
             _broadcast(batch['attention_mask'])
-            if dmi_valid_count_enabled:
-                if not args.sft:
-                    batch['dmi_valid_count'] = _broadcast_dmi_valid_count(batch['dmi_valid_count'])
 
     else:
         if args.hybrid_context_parallel:
@@ -900,9 +856,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             cu_seqlens = _broadcast_cu_seqlens()
             _broadcast(max_seqlen)
             _broadcast(local_cp_size)
-            if dmi_valid_count_enabled:
-                if not args.sft:
-                    dmi_valid_count = _broadcast_dmi_valid_count()
 
         elif mpu.is_pipeline_first_stage():
             labels = None
@@ -913,9 +866,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(position_ids)
             cu_seqlens = _broadcast_cu_seqlens()
             _broadcast(max_seqlen)
-            if dmi_valid_count_enabled:
-                if not args.sft:
-                    dmi_valid_count = _broadcast_dmi_valid_count()
 
         elif mpu.is_pipeline_last_stage():
             # Multi-Token Prediction (MTP) layers need tokens and position_ids to calculate embedding.
@@ -929,9 +879,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(labels)
             _broadcast(loss_mask)
             _broadcast(attention_mask)
-            if dmi_valid_count_enabled:
-                if not args.sft:
-                    dmi_valid_count = _broadcast_dmi_valid_count()
 
         batch = {
             'tokens': tokens,
