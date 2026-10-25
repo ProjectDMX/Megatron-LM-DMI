@@ -347,6 +347,21 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
         return hidden_states.view(self.hidden_shape)
 
 
+def dmi_virtual_source_counts(routing_map: torch.Tensor, num_shards: int) -> torch.Tensor:
+    """DMI: [num_shards, num_experts] routed-row counts per contiguous local-token shard.
+
+    With EP == 1 and unfused dropless permutation, each expert block keeps ascending
+    token order within each TP source, so every shard is one contiguous row range per
+    expert block.
+    """
+    num_tokens, num_experts = routing_map.shape
+    if num_tokens % num_shards:
+        raise ValueError("DMI virtual sources require local tokens divisible by the shard count")
+    return routing_map.view(num_shards, num_tokens // num_shards, num_experts).sum(
+        dim=1, dtype=torch.long
+    )
+
+
 class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
     """
     AlltoAll-based token dispatcher.
@@ -463,6 +478,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.shared_experts = None
         self.dmi_moe_inverse_map = None
         self.dmi_source_sampling = None
+        # DMI virtual-source sampling (1 = disabled; EP sources are used as before).
+        self.dmi_virtual_sources = 1
+        self.dmi_source_counts_cpu = None
 
     def set_shared_experts(self, shared_experts):
         """Set shared expert to the dispatcher."""
@@ -515,6 +533,13 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         # [num_experts], number of tokens assigned to each expert from the current rank's input.
         num_local_tokens_per_expert = routing_map.sum(dim=0).long()
 
+        sample_sources = self.dmi_source_sampling is not None and self.dmi_source_sampling.enabled()
+        preserve_graph_outputs = getattr(self, 'dmi_preserve_source_count_graph_outputs', False)
+        dmi_virtual = (sample_sources or preserve_graph_outputs) and self.dmi_virtual_sources > 1
+        if dmi_virtual:
+            # DMI: [num_shards, num_experts] counts for this rank's contiguous token shards.
+            dmi_shard_counts = dmi_virtual_source_counts(routing_map, self.dmi_virtual_sources)
+
         if (
             self.config.moe_expert_capacity_factor is not None
             or self.config.moe_router_padding_for_quantization
@@ -539,14 +564,28 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             # Gather the global distribution of tokens across ranks.
             # num_global_tokens_per_expert represents the number of tokens sent to each
             # expert by all ranks.
-            # [tp_size, ep_size, num_experts]
-            num_global_tokens_per_expert = (
-                gather_from_sequence_parallel_region(
-                    num_local_tokens_per_expert, group=self.tp_ep_group
-                )
-                .reshape(self.ep_size, self.tp_size, self.num_experts)
-                .transpose(0, 1)
+            local_counts = num_local_tokens_per_expert
+            if dmi_virtual:
+                # DMI: shard counts join the existing count all-gather; no extra collective.
+                local_counts = torch.cat(
+                    [num_local_tokens_per_expert.view(1, -1), dmi_shard_counts]
+                ).view(-1)
+            gathered_counts = gather_from_sequence_parallel_region(
+                local_counts, group=self.tp_ep_group
             )
+            if dmi_virtual:
+                gathered_counts = gathered_counts.view(
+                    self.tp_size * self.ep_size, 1 + self.dmi_virtual_sources, self.num_experts
+                )
+                # [tp_size * num_shards, num_local_experts], TP-source-major (EP == 1).
+                self.dmi_source_counts_gpu = gathered_counts[
+                    :, 1:, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
+                ].reshape(-1, self.num_local_experts)
+                gathered_counts = gathered_counts[:, 0]
+            # [tp_size, ep_size, num_experts]
+            num_global_tokens_per_expert = gathered_counts.reshape(
+                self.ep_size, self.tp_size, self.num_experts
+            ).transpose(0, 1)
             # [tp_size, ep_size, num_experts] -> [tp_size, ep_size, num_local_experts]
             num_global_tokens_per_local_expert = num_global_tokens_per_expert[
                 :, :, self.local_expert_indices[0] : self.local_expert_indices[-1] + 1
@@ -577,9 +616,11 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             # to get the `num_tokens_per_local_expert` CPU value.
             self._maybe_update_cuda_sync_point("before_finish")
 
-        sample_sources = self.dmi_source_sampling is not None and self.dmi_source_sampling.enabled()
-        preserve_graph_outputs = getattr(self, 'dmi_preserve_source_count_graph_outputs', False)
-        if sample_sources or preserve_graph_outputs:
+        if dmi_virtual:
+            if self.ep_size == 1 and self.tp_size == 1:
+                self.dmi_source_counts_gpu = dmi_shard_counts
+            # Otherwise set above from the gathered per-source shard counts.
+        elif sample_sources or preserve_graph_outputs:
             self.dmi_source_counts_gpu = num_global_tokens_per_local_expert.view(
                 -1, self.num_local_experts
             )
@@ -913,6 +954,11 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
                     if (self.num_local_experts > 1 or sample_sources) and not self.config.moe_permute_fusion:
                         self.num_global_tokens_per_local_expert = maybe_move_tensor_to_cpu(
                             self.num_global_tokens_per_local_expert, record_stream=on_side_stream
+                        )
+                    if sample_sources and self.dmi_virtual_sources > 1:
+                        # Shard counts join the existing DtoH batch; no extra sync point.
+                        self.dmi_source_counts_cpu = maybe_move_tensor_to_cpu(
+                            self.dmi_source_counts_gpu, record_stream=on_side_stream
                         )
                 self.d2h_event = self.cuda_dtoh_stream.record_event()
 

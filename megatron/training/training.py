@@ -3539,6 +3539,11 @@ def evaluate(
             dmi_begin_evaluation_iteration,
             dmi_finish_evaluation_iteration,
         )
+    # Opt-in: end the evaluation measurement right after forward_backward_func, the
+    # same span as the unmonitored reference's ValidationBoundary. Default unchanged.
+    dmi_eval_timing_forward_only = dmi_timing_enabled and os.getenv(
+        "DMI_EVAL_TIMING_SCOPE", ""
+    ).strip().lower() == "forward"
 
     with torch.no_grad():
         iteration = 0
@@ -3567,6 +3572,8 @@ def evaluate(
                 adjust_tensor_shapes_fn=adjust_tensor_shapes_fn,
             )
             ft_integration.on_eval_step_end()
+            if dmi_eval_timing_forward_only:
+                dmi_finish_evaluation_iteration()
             config.timers = get_timers()
 
             # Empty unused memory
@@ -3611,7 +3618,7 @@ def evaluate(
 
             args.consumed_valid_samples += eval_batch_size
 
-            if dmi_timing_enabled:
+            if dmi_timing_enabled and not dmi_eval_timing_forward_only:
                 dmi_finish_evaluation_iteration()
 
             if args.exit_duration_in_mins:
