@@ -232,6 +232,7 @@ class MoELayer(BaseMoELayer):
             and "shared_experts" in config.recompute_modules
         )
         self.dmi_moe_packed_weighted_output = None
+        self.dmi_moe_tp_complete_output = None
 
         self.tp_group = pg_collection.tp
 
@@ -502,6 +503,13 @@ class MoELayer(BaseMoELayer):
             elif sampling is None:
                 self.dmi_moe_packed_weighted_output(expert_output)
         output = self.token_dispatcher.combine_preprocess(expert_output)
+        # Separate experiment hook: EP=1, ETP>1 AlltoAll only (validated at setup).
+        # ETP partials are reduced; per-expert route rows have not been summed.
+        if self.dmi_moe_tp_complete_output is not None:
+            self.dmi_moe_tp_complete_output(
+                output, self.token_dispatcher.routing_map,
+                self.token_dispatcher.reversed_local_input_permutation_mapping,
+            )
 
         return output, mlp_bias
 
