@@ -48,10 +48,22 @@ try:
         dmi_d2h_windows_active,
         dmi_end_iteration,
         dmi_enter_current_scope,
+        dmi_first_forward_receive_boundary,
+        dmi_first_forward_compute_boundary,
+        dmi_last_backward_send_boundary,
         dmi_guard_schedule_supported,
         dmi_set_current_event,
     )
 except Exception:
+    def dmi_first_forward_receive_boundary():
+        pass
+
+    def dmi_first_forward_compute_boundary():
+        pass
+
+    def dmi_last_backward_send_boundary():
+        pass
+
     def dmi_advance_d2h_boundary():
         pass
 
@@ -2267,14 +2279,20 @@ def forward_backward_pipelining_without_interleaving(
             checkpoint_activations_microbatch = None
 
         if dmi_forward_recv_windows:
-            dmi_advance_d2h_boundary()
+            if i == 0:
+                dmi_first_forward_receive_boundary()
+            else:
+                dmi_advance_d2h_boundary()
         input_tensor = p2p_communicator.recv_forward(
             recv_tensor_shapes, p2p_communicator.is_pp_first_stage
         )
         dmi_set_current_event("fwd", i, 0)
         # Close at the next computation entry, not at the P2P return.
         if dmi_forward_recv_windows:
-            dmi_advance_d2h_boundary()
+            if i == 0:
+                dmi_first_forward_compute_boundary()
+            else:
+                dmi_advance_d2h_boundary()
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -2304,7 +2322,10 @@ def forward_backward_pipelining_without_interleaving(
     # receive this tensor here.
     if num_microbatches_remaining > 0:
         if dmi_forward_recv_windows:
-            dmi_advance_d2h_boundary()
+            if num_warmup_microbatches == 0:
+                dmi_first_forward_receive_boundary()
+            else:
+                dmi_advance_d2h_boundary()
         input_tensor = p2p_communicator.recv_forward(
             recv_tensor_shapes, p2p_communicator.is_pp_first_stage
         )
@@ -2324,7 +2345,10 @@ def forward_backward_pipelining_without_interleaving(
         forward_microbatch_id = i + num_warmup_microbatches
         dmi_set_current_event("fwd", forward_microbatch_id, 0)
         if dmi_forward_recv_windows:
-            dmi_advance_d2h_boundary()
+            if forward_microbatch_id == 0:
+                dmi_first_forward_compute_boundary()
+            else:
+                dmi_advance_d2h_boundary()
         output_tensor, num_tokens = forward_step(
             forward_step_func,
             data_iterator,
@@ -2388,6 +2412,8 @@ def forward_backward_pipelining_without_interleaving(
                 p2p_communicator.send_backward(
                     input_tensor_grad, p2p_communicator.is_pp_first_stage
                 )
+                if dmi_window_boundaries and num_warmup_microbatches == 0:
+                    dmi_last_backward_send_boundary()
             else:
                 if dmi_forward_recv_windows:
                     dmi_advance_d2h_boundary()
@@ -2427,6 +2453,9 @@ def forward_backward_pipelining_without_interleaving(
             )
 
             p2p_communicator.send_backward(input_tensor_grad, p2p_communicator.is_pp_first_stage)
+
+            if dmi_window_boundaries and i == num_warmup_microbatches - 1:
+                dmi_last_backward_send_boundary()
 
         # Launch any remaining grad reductions.
         if no_sync_context is not None:

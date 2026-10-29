@@ -2498,6 +2498,9 @@ def save_checkpoint_and_time(
     non_persistent_ckpt=False,
     train_data_iterator=None,
 ):
+    dmi_runtime = sys.modules.get('dmi_megatron_integration.schedule_runtime')
+    if dmi_runtime is not None:
+        dmi_runtime.dmi_interrupt_d2h_tail()
     args = get_args()
     timers = get_timers()
     energy_monitor = get_energy_monitor()

@@ -111,6 +111,11 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
         args = load_yaml(args.yaml_cfg)
 
 
+    # Resolve YAML observation dependencies before training's DMI enable gates.
+    if getattr(args, 'dmi_signal_config', None) or os.getenv('DMI_SIGNAL_CONFIG'):
+        from dmi_megatron_integration.signals.capture import configure_signal_capture_args
+        configure_signal_capture_args(args)
+
     # Args from environment
     args.rank = int(os.getenv('RANK', '0'))
     args.world_size = int(os.getenv("WORLD_SIZE", '1'))
@@ -3421,6 +3426,11 @@ def _add_dmi_args(parser):
     group.add_argument(
         '--dmi-hook-config', type=str, default=None,
         help='Optional YAML with hook-scoped source_sampling configuration.',
+    )
+    group.add_argument(
+        '--dmi-signal-config', type=str, default=None,
+        help='Signal YAML whose input dependencies automatically enable DMI capture hooks. '
+             'Explicit hook selections are added; training parameters and sampling remain separate.',
     )
     for phase in ("train", "valid", "test"):
         group.add_argument(
